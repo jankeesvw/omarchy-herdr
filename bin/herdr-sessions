@@ -1,0 +1,281 @@
+#!/bin/bash
+# herdr-sessions — what the herdr widget needs to know, as JSON.
+#
+# Herdr runs one server per named session. `herdr session list` knows which
+# ones exist, and each running server answers `api snapshot` with the agents
+# and workspaces inside it. This script joins the two, adds the Hyprland
+# window that is showing each session, and prints one object the panel can
+# draw without any further work.
+#
+#   list          every session, running or stopped
+#   open <name>   focus the window showing that session, or open one
+#   stop <name>   stop the session's server
+#   delete <name> remove a stopped session's directory
+#
+# Every value below the session name comes from a snapshot: workspace labels
+# are directory names, agent titles are whatever an agent wrote there. They
+# are printed as JSON strings and drawn as plain text, never handed to a
+# shell.
+
+set -euo pipefail
+umask 077
+
+readonly APP_ID=org.omarchy.herdr
+
+die() {
+  printf '{"ok":false,"error":%s,"sessions":[]}\n' "$(json_string "$1")"
+  exit 0
+}
+
+# JSON-encode with jq, so a session name or window title with a quote, a
+# backslash or a newline in it cannot break the object the panel parses.
+json_string() {
+  printf '%s' "${1-}" | jq -Rs .
+}
+
+# Session names come from `herdr session list`, but they also arrive back as
+# an argument from the panel, so they are checked before they reach a command
+# line. A name shaped like anything else means the other side is not what we
+# think it is: refuse it rather than tidy it up.
+valid_session_name() {
+  [[ "${1-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+}
+
+require_tools() {
+  local tool
+  for tool in herdr jq; do
+    command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
+  done
+}
+
+# ---------------------------------------------------------------- windows
+
+# Which Hyprland window is showing which session.
+#
+# The launcher puts `herdr --session <name>` on the terminal's own command
+# line, so most windows are recognised from that alone. A herdr started by
+# hand inside an existing terminal is not, so the client processes are walked
+# up to their window instead: a process named exactly `herdr` is the client,
+# `herdr server` is not.
+#
+# Prints "session<TAB>address" per line. Sessions without a window are absent.
+window_map() {
+  command -v hyprctl >/dev/null 2>&1 || return 0
+
+  local clients
+  clients=$(hyprctl clients -j 2>/dev/null) || return 0
+  [[ -n $clients ]] || return 0
+
+  declare -A window_of_pid=()
+  local pid address
+  while IFS=$'\t' read -r pid address; do
+    [[ -n $pid && -n $address ]] || continue
+    window_of_pid[$pid]=$address
+  done < <(printf '%s' "$clients" |
+    jq -r '.[] | select(.pid > 0) | "\(.pid)\t\(.address)"' 2>/dev/null)
+
+  ((${#window_of_pid[@]})) || return 0
+
+  declare -A parent_of=()
+  declare -A args_of=()
+  while read -r pid ppid args; do
+    [[ $pid =~ ^[0-9]+$ ]] || continue
+    parent_of[$pid]=$ppid
+    args_of[$pid]=$args
+  done < <(ps -eo pid=,ppid=,args= 2>/dev/null)
+
+  declare -A seen=()
+
+  emit() {
+    local session="$1" address="$2"
+    [[ -n ${seen[$session]-} ]] && return 0
+    seen[$session]=1
+    printf '%s\t%s\n' "$session" "$address"
+  }
+
+  # Read a session name out of a command line that runs herdr. Prints nothing
+  # when the command line is not a herdr client.
+  session_in_args() {
+    local -a words
+    read -r -a words <<<"${1-}"
+    local i name
+    for ((i = 0; i < ${#words[@]}; i++)); do
+      [[ ${words[i]##*/} == herdr ]] || continue
+      # `herdr server` is the background process, not a window's client.
+      [[ ${words[i + 1]-} == server ]] && return 1
+      name=default
+      local j
+      for ((j = i + 1; j < ${#words[@]}; j++)); do
+        [[ ${words[j]} == --session ]] || continue
+        name=${words[j + 1]-}
+        break
+      done
+      valid_session_name "$name" || return 1
+      printf '%s' "$name"
+      return 0
+    done
+    return 1
+  }
+
+  # The terminal's own command line first: that is how the launcher starts one.
+  for pid in "${!window_of_pid[@]}"; do
+    local session
+    session=$(session_in_args "${args_of[$pid]-}") || continue
+    emit "$session" "${window_of_pid[$pid]}"
+  done
+
+  # Then anything started by hand, walked up from the client to its window.
+  for pid in "${!args_of[@]}"; do
+    local session ancestor hops
+    session=$(session_in_args "${args_of[$pid]-}") || continue
+    ancestor=$pid
+    for ((hops = 0; hops < 12; hops++)); do
+      ancestor=${parent_of[$ancestor]-}
+      [[ -n $ancestor && $ancestor != 0 && $ancestor != 1 ]] || break
+      if [[ -n ${window_of_pid[$ancestor]-} ]]; then
+        emit "$session" "${window_of_pid[$ancestor]}"
+        break
+      fi
+    done
+  done
+}
+
+# ---------------------------------------------------------------- listing
+
+# One session's agents and workspaces, from its own server. `--session` is
+# left off for the default one: passing it by name would address a *named*
+# session that happens to be called "default", which is a different server.
+snapshot_for() {
+  local name="$1" is_default="$2"
+  local out
+  if [[ $is_default == true ]]; then
+    out=$(herdr api snapshot 2>/dev/null) || return 1
+  else
+    out=$(herdr --session "$name" api snapshot 2>/dev/null) || return 1
+  fi
+  [[ -n $out ]] || return 1
+  printf '%s' "$out"
+}
+
+cmd_list() {
+  local sessions_json
+  sessions_json=$(herdr session list --json 2>/dev/null) || die "could not reach herdr"
+  [[ -n $sessions_json ]] || die "could not reach herdr"
+
+  local windows
+  windows=$(window_map || true)
+
+  # The snapshots are collected here rather than in jq, because each one is a
+  # separate command. They go in as a name-keyed object, so the merge below is
+  # a lookup instead of a search.
+  local snapshots='{}' name is_default running snap
+  while IFS=$'\t' read -r name is_default running; do
+    [[ -n $name ]] || continue
+    [[ $running == true ]] || continue
+    valid_session_name "$name" || continue
+    snap=$(snapshot_for "$name" "$is_default") || continue
+    snapshots=$(printf '%s' "$snapshots" |
+      jq -c --arg name "$name" --argjson snap "$snap" \
+        '.[$name] = ($snap.result.snapshot // {})' 2>/dev/null) || snapshots='{}'
+  done < <(printf '%s' "$sessions_json" |
+    jq -r '.sessions[]? | "\(.name)\t\(.default // false)\t\(.running // false)"')
+
+  printf '%s' "$sessions_json" | jq -c \
+    --argjson snapshots "$snapshots" \
+    --arg windows "$windows" '
+    ($windows | split("\n") | map(select(length > 0) | split("\t"))
+      | map({key: .[0], value: .[1]}) | from_entries) as $win
+    | [.sessions[]?
+       | .name as $name
+       | ($snapshots[$name] // {}) as $snap
+       | ($snap.agents // []) as $agents
+       | {
+           name: $name,
+           isDefault: (.default // false),
+           running: (.running // false),
+           version: ($snap.version // ""),
+           agents: ($agents | length),
+           working: ([$agents[] | select(.agent_status == "working")] | length),
+           blocked: ([$agents[] | select(.agent_status == "blocked")] | length),
+           idle:    ([$agents[] | select(.agent_status == "idle")] | length),
+           done:    ([$agents[] | select(.agent_status == "done")] | length),
+           workspaces: (($snap.workspaces // []) | length),
+           projects: (($snap.workspaces // []) | map(.label // "")
+                      | map(select(length > 0)) | unique),
+           windowAddress: ($win[$name] // "")
+         }]
+    | sort_by([(if .isDefault then 0 else 1 end),
+               (if .running then 0 else 1 end),
+               (.name | ascii_downcase)])
+    | {ok: true,
+       error: "",
+       sessions: .,
+       running: ([.[] | select(.running)] | length),
+       agents: ([.[] | .agents] | add // 0),
+       blocked: ([.[] | .blocked] | add // 0),
+       working: ([.[] | .working] | add // 0)}
+  ' 2>/dev/null || die "unexpected output from herdr"
+}
+
+# ------------------------------------------------------------- open a session
+
+cmd_open() {
+  local name="${1-}"
+  valid_session_name "$name" || die "not a session name"
+
+  local address
+  address=$(window_map | awk -F'\t' -v want="$name" '$1 == want { print $2; exit }')
+
+  if [[ -n $address && -n ${address//[!0-9a-fx]/} ]]; then
+    # Quattro's hyprctl parses its argument as Lua, so `dispatch focuswindow`
+    # is a syntax error now. The address is single-quoted inside the Lua call.
+    hyprctl dispatch "hl.dsp.focus({ window = 'address:$address' })" >/dev/null 2>&1
+    printf '{"ok":true}\n'
+    return 0
+  fi
+
+  # No window: open one. The session keeps its own state, so the directory
+  # only matters the very first time a name is used.
+  local -a launch=(setsid uwsm-app -- xdg-terminal-exec
+    "--app-id=$APP_ID" "--dir=$HOME" -- herdr)
+  [[ $name == default ]] || launch+=(--session "$name")
+
+  if command -v uwsm-app >/dev/null 2>&1 && command -v xdg-terminal-exec >/dev/null 2>&1; then
+    "${launch[@]}" >/dev/null 2>&1 &
+    disown
+    printf '{"ok":true}\n'
+    return 0
+  fi
+
+  die "no terminal launcher available"
+}
+
+# ------------------------------------------------------------ stop / delete
+
+cmd_stop() {
+  local name="${1-}"
+  valid_session_name "$name" || die "not a session name"
+  [[ $name == default ]] && die "the default session is not stopped from here"
+  herdr session stop -- "$name" >/dev/null 2>&1 || true
+  printf '{"ok":true}\n'
+}
+
+cmd_delete() {
+  local name="${1-}"
+  valid_session_name "$name" || die "not a session name"
+  [[ $name == default ]] && die "the default session is not deleted from here"
+  herdr session delete -- "$name" >/dev/null 2>&1 || true
+  printf '{"ok":true}\n'
+}
+
+# ------------------------------------------------------------------- main
+
+require_tools
+
+case "${1:-list}" in
+  list) cmd_list ;;
+  open) shift; cmd_open "${1-}" ;;
+  stop) shift; cmd_stop "${1-}" ;;
+  delete) shift; cmd_delete "${1-}" ;;
+  *) die "unknown command" ;;
+esac

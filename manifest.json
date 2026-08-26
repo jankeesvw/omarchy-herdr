@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "jankeesvw.herdr",
+  "name": "Herdr",
+  "version": "1.0.0",
+  "author": "Jankees",
+  "description": "Running herdr servers in the bar, with the agents in each and a click to open one",
+  "homepage": "https://github.com/jankeesvw/omarchy-herdr",
+  "license": "MIT",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Herdr",
+    "description": "Running herdr servers in the bar, with the agents in each and a click to open one",
+    "category": "Apps",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
