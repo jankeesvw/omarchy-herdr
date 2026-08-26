@@ -48,12 +48,19 @@ Panel {
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color accent: Color.accent
   readonly property color urgent: bar ? bar.urgent : Color.urgent
+  // Omarchy themes carry a foreground, an accent and an urgent, and no green.
+  // "Finished" is green everywhere there is a build, a test or a task list, and
+  // borrowing the accent for it would leave a finished agent looking exactly
+  // like a working one - which is the distinction this widget exists to draw.
+  // So this one colour is picked rather than themed.
+  readonly property color finished: "#5FA46B"
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   property var sessions: []
   property int runningCount: 0
   property int agentCount: 0
   property int blockedCount: 0
+  property int doneCount: 0
   property int workingCount: 0
   property bool reachable: true
   property string errorText: ""
@@ -165,9 +172,13 @@ Panel {
 
   // The one word worth colouring: blocked means an agent is waiting on you,
   // working means it is busy. Anything else is quiet and says nothing.
+  // Waiting beats finished beats busy, everywhere a state has to be reduced
+  // to one thing: a question on screen outranks work that has already ended,
+  // and both outrank an agent that is simply busy.
   function noteLabel(session) {
     if (!session || !session.running) return ""
-    if ((session.blocked || 0) > 0) return session.blocked + " blocked"
+    if ((session.blocked || 0) > 0) return session.blocked + " needs you"
+    if ((session.done || 0) > 0) return session.done + " done"
     if ((session.working || 0) > 0) return session.working + " working"
     return ""
   }
@@ -198,26 +209,61 @@ Panel {
 
   function agentColor(status) {
     if (status === "blocked") return root.urgent
+    if (status === "done") return root.finished
     if (status === "working") return root.accent
     return Qt.darker(root.foreground, 1.9)
   }
 
+  // The two states that are news: one wants an answer, the other finished
+  // something while you were not looking. Everything else is an agent minding
+  // its own business and gets no label at all - a badge on every row is a
+  // badge on none.
+  function agentNote(status) {
+    if (status === "blocked") return "needs you"
+    if (status === "done") return "done"
+    return ""
+  }
+
+  function agentWants(status) {
+    return status === "blocked" || status === "done"
+  }
+
   function noteColor(session) {
     if (!session) return root.foreground
-    return (session.blocked || 0) > 0 ? root.urgent : root.accent
+    if ((session.blocked || 0) > 0) return root.urgent
+    if ((session.done || 0) > 0) return root.finished
+    return root.accent
   }
 
   function statusColor(session) {
     if (!session || !session.running) return Qt.darker(root.foreground, 2.2)
     if ((session.blocked || 0) > 0) return root.urgent
+    if ((session.done || 0) > 0) return root.finished
     if ((session.working || 0) > 0) return root.accent
     return Qt.darker(root.foreground, 1.7)
+  }
+
+  function badgeColor() {
+    if (blockedCount > 0) return root.urgent
+    if (doneCount > 0) return root.finished
+    return root.accent
   }
 
   function titleText() {
     var s = runningCount === 1 ? " server" : " servers"
     var a = agentCount === 1 ? " agent" : " agents"
     return "Herdr (" + runningCount + s + ", " + agentCount + a + ")"
+  }
+
+  // The bar shows a bare number, which says nothing about what it counts. The
+  // tooltip is where that gets spelled out, and where a herd that wants
+  // something says so before the panel is even open.
+  function tooltipText() {
+    var parts = [runningCount + (runningCount === 1 ? " herdr server" : " herdr servers"),
+                 agentCount + (agentCount === 1 ? " agent" : " agents")]
+    if (blockedCount > 0) parts.push(blockedCount + " waiting on you")
+    if (doneCount > 0) parts.push(doneCount + " finished")
+    return parts.join(", ")
   }
 
   function applyPayload(text) {
@@ -230,6 +276,7 @@ Panel {
       runningCount = data.running || 0
       agentCount = data.agents || 0
       blockedCount = data.blocked || 0
+      doneCount = data.done || 0
       workingCount = data.working || 0
       if (cursor > sessions.length - 1) cursor = sessions.length - 1
     } catch (e) {
@@ -289,7 +336,7 @@ Panel {
     // for one glyph. Widen it too, or the icon falls outside it and only the
     // badge survives.
     opticalSize: root.barContentWidth
-    tooltipText: root.plain(root.titleText())
+    tooltipText: root.plain(root.tooltipText())
 
     iconComponent: Component {
       Item {
@@ -316,7 +363,7 @@ Panel {
             height: Style.space(12)
             width: root.badgeWidth
             radius: height / 2
-            color: root.blockedCount > 0 ? root.urgent : root.accent
+            color: root.badgeColor()
 
             Text {
               anchors.centerIn: parent
@@ -549,13 +596,18 @@ Panel {
                 Repeater {
                   model: root.agentsOf(row.modelData)
 
-                  Row {
+                  // A row rather than a Row: the note is right-aligned so the
+                  // titles keep one left edge down the whole panel, and the
+                  // title elides into whatever is left between the two.
+                  Item {
                     id: agentRow
                     required property var modelData
                     width: agentColumn.width
-                    spacing: Style.space(5)
+                    height: agentTitle.implicitHeight
 
                     Text {
+                      id: agentDot
+                      anchors.left: parent.left
                       anchors.verticalCenter: parent.verticalCenter
                       text: root.iconDot
                       textFormat: Text.PlainText
@@ -564,15 +616,37 @@ Panel {
                       color: root.agentColor(agentRow.modelData.status)
                     }
 
+                    // An agent that wants something is written at full
+                    // strength; the rest stay dimmed, so the line worth
+                    // reading is the one that stands out of the column.
                     Text {
+                      id: agentTitle
+                      anchors.left: agentDot.right
+                      anchors.leftMargin: Style.space(5)
+                      anchors.right: agentNote.visible ? agentNote.left : parent.right
+                      anchors.rightMargin: agentNote.visible ? Style.space(6) : 0
                       anchors.verticalCenter: parent.verticalCenter
-                      width: agentRow.width - Style.space(10)
                       text: root.cleanTitle(agentRow.modelData.title)
                       textFormat: Text.PlainText
                       elide: Text.ElideRight
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
-                      color: Qt.darker(root.foreground, 1.35)
+                      color: root.agentWants(agentRow.modelData.status)
+                        ? root.foreground
+                        : Qt.darker(root.foreground, 1.35)
+                    }
+
+                    Text {
+                      id: agentNote
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      visible: root.agentNote(agentRow.modelData.status) !== ""
+                      text: root.agentNote(agentRow.modelData.status)
+                      textFormat: Text.PlainText
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                      color: root.agentColor(agentRow.modelData.status)
                     }
                   }
                 }

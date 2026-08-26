@@ -11,6 +11,16 @@
 #   open <name>   focus the window showing that session, or open one
 #   stop <name>   stop the session's server
 #   delete <name> remove a stopped session's directory
+#   demo on|off   invented sessions instead of yours, for screenshots
+#
+# Demo mode exists so a screenshot never carries real project names or agent
+# titles, and so it looks the same in a year. Every write is a no-op while it
+# is on, so a click during a shoot cannot stop a real server.
+#
+# Agent states are herdr's own: `blocked` means it recognised an approval or
+# question on screen, so that agent is waiting on you. `done` is idle after
+# background work you have not looked at yet - the tab goes back to `idle` the
+# moment it is focused. Those two are the ones worth noticing.
 #
 # Every value below the session name comes from a snapshot: workspace labels
 # are directory names, agent titles are whatever an agent wrote there. They
@@ -21,6 +31,8 @@ set -euo pipefail
 umask 077
 
 readonly APP_ID=org.omarchy.herdr
+readonly CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-herdr"
+readonly DEMO_FILE="$CACHE_DIR/demo"
 
 die() {
   printf '{"ok":false,"error":%s,"sessions":[]}\n' "$(json_string "$1")"
@@ -39,6 +51,60 @@ json_string() {
 # think it is: refuse it rather than tidy it up.
 valid_session_name() {
   [[ "${1-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+}
+
+# A directory someone else can write to is a directory that can hand this
+# script a symlink on the name it is about to write. Refuse rather than repair
+# what is not ours, and repair the rest unconditionally: a mode set once says
+# nothing about what a previous version left inside.
+private_dir() {
+  local dir="$1" owner
+  mkdir -p -m 700 -- "$dir" 2>/dev/null
+  [[ -d $dir && ! -L $dir ]] || return 1
+  owner="$(stat -c '%u' -- "$dir" 2>/dev/null)" || return 1
+  [[ $owner == "$(id -u)" ]] || return 1
+  chmod 700 -- "$dir" 2>/dev/null || return 1
+  find "$dir" -mindepth 1 -maxdepth 1 ! -type f -exec rm -rf -- {} + 2>/dev/null
+  find "$dir" -mindepth 1 -maxdepth 1 -type f -exec chmod 600 -- {} + 2>/dev/null
+  return 0
+}
+
+readable_file() {
+  [[ -f "$1" && ! -L "$1" ]]
+}
+
+demo_on() {
+  readable_file "$DEMO_FILE"
+}
+
+cmd_demo() {
+  case "${1-}" in
+    on)
+      private_dir "$CACHE_DIR" || die "could not use the cache directory"
+      : > "$DEMO_FILE"
+      chmod 600 -- "$DEMO_FILE" 2>/dev/null || true
+      printf '{"ok":true,"demo":true}\n'
+      ;;
+    off)
+      rm -f -- "$DEMO_FILE"
+      printf '{"ok":true,"demo":false}\n'
+      ;;
+    *) die "demo takes on or off" ;;
+  esac
+}
+
+# Invented, but modelled on real work rather than made into a joke: a session
+# waiting on an approval, one that finished while nobody was looking, one still
+# going, and one whose server has been left behind.
+demo_list() {
+  cat <<'DEMO'
+{"ok":true,"error":"","sessions":[
+{"name":"default","isDefault":true,"running":true,"version":"0.8.2","agents":2,"working":1,"blocked":0,"idle":1,"done":0,"workspaces":2,"projects":["checkout-service","design-tokens"],"agentList":[{"title":"Rewrite the receipt formatter","status":"working"},{"title":"Token names for the new palette","status":"idle"}],"windowAddress":"0x1"},
+{"name":"3","isDefault":false,"running":true,"version":"0.8.2","agents":1,"working":0,"blocked":1,"idle":0,"done":0,"workspaces":1,"projects":["billing-api"],"agentList":[{"title":"Drop the legacy invoice table","status":"blocked"}],"windowAddress":"0x2"},
+{"name":"5","isDefault":false,"running":true,"version":"0.8.2","agents":2,"working":0,"blocked":0,"idle":0,"done":2,"workspaces":1,"projects":["docs-site"],"agentList":[{"title":"Upgrade the search index","status":"done"},{"title":"Fix the broken anchor links","status":"done"}],"windowAddress":""},
+{"name":"9","isDefault":false,"running":false,"version":"","agents":0,"working":0,"blocked":0,"idle":0,"done":0,"workspaces":0,"projects":[],"agentList":[],"windowAddress":""}
+],"running":3,"agents":5,"blocked":1,"done":2,"working":1}
+DEMO
 }
 
 require_tools() {
@@ -219,6 +285,7 @@ cmd_list() {
        running: ([.[] | select(.running)] | length),
        agents: ([.[] | .agents] | add // 0),
        blocked: ([.[] | .blocked] | add // 0),
+       done: ([.[] | .done] | add // 0),
        working: ([.[] | .working] | add // 0)}
   ' 2>/dev/null || die "unexpected output from herdr"
 }
@@ -299,9 +366,12 @@ cmd_delete() {
 require_tools
 
 case "${1:-list}" in
-  list) cmd_list ;;
-  open) shift; cmd_open "${1-}" ;;
-  stop) shift; cmd_stop "${1-}" ;;
-  delete) shift; cmd_delete "${1-}" ;;
+  list) if demo_on; then demo_list; else cmd_list; fi ;;
+  # Every write is a no-op while the demo is on, so a click during a shoot
+  # cannot reach a real session.
+  open) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_open "${1-}"; fi ;;
+  stop) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_stop "${1-}"; fi ;;
+  delete) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_delete "${1-}"; fi ;;
+  demo) shift; cmd_demo "${1-}" ;;
   *) die "unknown command" ;;
 esac
