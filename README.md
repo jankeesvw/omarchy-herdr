@@ -18,6 +18,8 @@ Each row in the panel is one session:
 - its name, in bold when a window is already showing it
 - the projects open inside it, taken from the workspace labels
 - how many agents it holds, and how many of those are working or blocked
+- what each of those agents is doing, from its terminal title, with its own
+  status dot beside it - three at most, the rest counted
 - a dot in the session's colour: red for blocked, accent for working, grey
   for idle, faint for a stopped server
 

@@ -200,6 +200,10 @@ cmd_list() {
            idle:    ([$agents[] | select(.agent_status == "idle")] | length),
            done:    ([$agents[] | select(.agent_status == "done")] | length),
            workspaces: (($snap.workspaces // []) | length),
+           agentList: ($agents
+                       | map({title: (.terminal_title_stripped // .terminal_title // ""),
+                              status: (.agent_status // "unknown")})
+                       | map(select(.title != ""))),
            projects: (($snap.workspaces // []) | map(.label // "")
                       | map(select(length > 0)) | unique),
            windowAddress: ($win[$name] // "")

@@ -172,6 +172,36 @@ Panel {
     return ""
   }
 
+  // Herdr puts a spinner glyph in front of a title while its agent is working,
+  // so the same task moves left and right as it ticks over. Dropping any run
+  // of leading symbols keeps the titles in one column; the status dot beside
+  // them says the same thing without moving.
+  function cleanTitle(title) {
+    var s = String(title || "").trim()
+    var stripped = s.replace(/^[^0-9A-Za-z\u00C0-\u024F]+/, "").trim()
+    return stripped !== "" ? stripped : s
+  }
+
+  // Three is what fits before a session stops being a row and starts being a
+  // list of its own. The rest are counted rather than named.
+  readonly property int titlesShown: 3
+
+  function agentsOf(session) {
+    if (!session) return []
+    return (session.agentList || []).slice(0, root.titlesShown)
+  }
+
+  function hiddenAgents(session) {
+    if (!session) return 0
+    return Math.max(0, (session.agentList || []).length - root.titlesShown)
+  }
+
+  function agentColor(status) {
+    if (status === "blocked") return root.urgent
+    if (status === "working") return root.accent
+    return Qt.darker(root.foreground, 1.9)
+  }
+
   function noteColor(session) {
     if (!session) return root.foreground
     return (session.blocked || 0) > 0 ? root.urgent : root.accent
@@ -448,6 +478,7 @@ Panel {
               }
 
               Column {
+                id: agentColumn
                 width: parent.width - Style.space(21) - actions.width - rowContent.spacing
                 spacing: Style.space(2)
 
@@ -511,6 +542,50 @@ Panel {
                   font.pixelSize: Style.font.caption
                   color: Qt.darker(root.foreground, 1.9)
                 }
+
+                // What each agent in there is actually doing. The title is
+                // whatever the agent wrote to the terminal, so it is external
+                // text: plain, elided, and never markup.
+                Repeater {
+                  model: root.agentsOf(row.modelData)
+
+                  Row {
+                    id: agentRow
+                    required property var modelData
+                    width: agentColumn.width
+                    spacing: Style.space(5)
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: root.iconDot
+                      textFormat: Text.PlainText
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.space(5)
+                      color: root.agentColor(agentRow.modelData.status)
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: agentRow.width - Style.space(10)
+                      text: root.cleanTitle(agentRow.modelData.title)
+                      textFormat: Text.PlainText
+                      elide: Text.ElideRight
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      color: Qt.darker(root.foreground, 1.35)
+                    }
+                  }
+                }
+
+                Text {
+                  width: parent.width
+                  visible: root.hiddenAgents(row.modelData) > 0
+                  text: "+" + root.hiddenAgents(row.modelData) + " more"
+                  textFormat: Text.PlainText
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  color: Qt.darker(root.foreground, 2.0)
+                }
               }
 
               // The buttons keep their slot on every row, so the names stay
@@ -519,7 +594,7 @@ Panel {
               // are not.
               Row {
                 id: actions
-                anchors.verticalCenter: parent.verticalCenter
+                anchors.top: parent.top
                 spacing: Style.space(2)
                 opacity: row.active ? 1 : 0.25
 
