@@ -116,6 +116,22 @@ require_tools() {
 
 # ---------------------------------------------------------------- windows
 
+# One step up the process tree. Read from /proc rather than kept in an array
+# of every process on the machine: only the handful of herdr clients are ever
+# walked, and each walk is a few reads.
+#
+# The comm field is in brackets and can hold spaces, so the line is cut after
+# the closing bracket before splitting: what follows is state, then ppid.
+parent_pid() {
+  local line rest
+  { read -r line < "/proc/$1/stat"; } 2>/dev/null || return 1
+  rest=${line#*") "}
+  # shellcheck disable=SC2086
+  set -- $rest
+  [[ ${2-} =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$2"
+}
+
 # Which Hyprland window is showing which session.
 #
 # The launcher puts `herdr --session <name>` on the terminal's own command
@@ -144,13 +160,14 @@ window_map() {
 
   ((${#window_of_pid[@]})) || return 0
 
-  declare -A parent_of=()
+  # Only the herdr processes are read in. Reading every command line on the
+  # machine into an array cost more than every other step in this script put
+  # together, and all but a handful of those lines never mention herdr.
   declare -A args_of=()
-  while read -r pid ppid args; do
+  while read -r pid args; do
     [[ $pid =~ ^[0-9]+$ ]] || continue
-    parent_of[$pid]=$ppid
     args_of[$pid]=$args
-  done < <(ps -eo pid=,ppid=,args= 2>/dev/null)
+  done < <(ps -eo pid=,args= 2>/dev/null | grep -E 'her[d]r')
 
   declare -A seen=()
 
@@ -161,25 +178,28 @@ window_map() {
     printf '%s\t%s\n' "$session" "$window"
   }
 
-  # Read a session name out of a command line that runs herdr. Prints nothing
-  # when the command line is not a herdr client.
+  # Read a session name out of a command line that runs herdr. The answer
+  # comes back in $found_session rather than on stdout: a command
+  # substitution forks a subshell, and this is called once per process on the
+  # machine. Through a `$()` it cost a third of a second per refresh.
+  local found_session=""
   session_in_args() {
+    found_session=""
     local -a words
     read -r -a words <<<"${1-}"
-    local i name
+    local i j name
     for ((i = 0; i < ${#words[@]}; i++)); do
       [[ ${words[i]##*/} == herdr ]] || continue
       # `herdr server` is the background process, not a window's client.
       [[ ${words[i + 1]-} == server ]] && return 1
       name=default
-      local j
       for ((j = i + 1; j < ${#words[@]}; j++)); do
         [[ ${words[j]} == --session ]] || continue
         name=${words[j + 1]-}
         break
       done
       valid_session_name "$name" || return 1
-      printf '%s' "$name"
+      found_session=$name
       return 0
     done
     return 1
@@ -187,21 +207,20 @@ window_map() {
 
   # The terminal's own command line first: that is how the launcher starts one.
   for pid in "${!window_of_pid[@]}"; do
-    local session
-    session=$(session_in_args "${args_of[$pid]-}") || continue
-    emit "$session" "${window_of_pid[$pid]}"
+    session_in_args "${args_of[$pid]-}" || continue
+    emit "$found_session" "${window_of_pid[$pid]}"
   done
 
   # Then anything started by hand, walked up from the client to its window.
+  local ancestor hops
   for pid in "${!args_of[@]}"; do
-    local session ancestor hops
-    session=$(session_in_args "${args_of[$pid]-}") || continue
+    session_in_args "${args_of[$pid]}" || continue
     ancestor=$pid
     for ((hops = 0; hops < 12; hops++)); do
-      ancestor=${parent_of[$ancestor]-}
+      ancestor=$(parent_pid "$ancestor") || break
       [[ -n $ancestor && $ancestor != 0 && $ancestor != 1 ]] || break
       if [[ -n ${window_of_pid[$ancestor]-} ]]; then
-        emit "$session" "${window_of_pid[$ancestor]}"
+        emit "$found_session" "${window_of_pid[$ancestor]}"
         break
       fi
     done
@@ -236,17 +255,25 @@ cmd_list() {
   # The snapshots are collected here rather than in jq, because each one is a
   # separate command. They go in as a name-keyed object, so the merge below is
   # a lookup instead of a search.
-  local snapshots='{}' name is_default running snap
+  #
+  # The object is assembled as text rather than folded together with a jq call
+  # per session: this runs every few seconds, and a jq start costs more than
+  # everything else in this function put together. The key is safe to splice
+  # in unquoted because valid_session_name has already refused anything but
+  # letters, digits, dot, dash and underscore.
+  local snapshots='' name is_default running snap
   while IFS=$'\t' read -r name is_default running; do
     [[ -n $name ]] || continue
     [[ $running == true ]] || continue
     valid_session_name "$name" || continue
     snap=$(snapshot_for "$name" "$is_default") || continue
-    snapshots=$(printf '%s' "$snapshots" |
-      jq -c --arg name "$name" --argjson snap "$snap" \
-        '.[$name] = ($snap.result.snapshot // {})' 2>/dev/null) || snapshots='{}'
+    snapshots+="${snapshots:+,}\"$name\":$snap"
   done < <(printf '%s' "$sessions_json" |
     jq -r '.sessions[]? | "\(.name)\t\(.default // false)\t\(.running // false)"')
+  snapshots="{$snapshots}"
+  # A truncated or unparseable reply from any one server must not take the
+  # whole list down with it.
+  printf '%s' "$snapshots" | jq -e . >/dev/null 2>&1 || snapshots='{}'
 
   printf '%s' "$sessions_json" | jq -c \
     --argjson snapshots "$snapshots" \
@@ -255,7 +282,7 @@ cmd_list() {
       | map({key: .[0], value: .[1]}) | from_entries) as $win
     | [.sessions[]?
        | .name as $name
-       | ($snapshots[$name] // {}) as $snap
+       | (($snapshots[$name].result.snapshot) // {}) as $snap
        | ($snap.agents // []) as $agents
        | {
            name: $name,
