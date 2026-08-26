@@ -58,7 +58,8 @@ require_tools() {
 # up to their window instead: a process named exactly `herdr` is the client,
 # `herdr server` is not.
 #
-# Prints "session<TAB>address" per line. Sessions without a window are absent.
+# Prints "session<TAB>address<TAB>workspace" per line. Sessions without a
+# window are absent.
 window_map() {
   command -v hyprctl >/dev/null 2>&1 || return 0
 
@@ -67,12 +68,13 @@ window_map() {
   [[ -n $clients ]] || return 0
 
   declare -A window_of_pid=()
-  local pid address
-  while IFS=$'\t' read -r pid address; do
+  local pid address workspace
+  while IFS=$'\t' read -r pid address workspace; do
     [[ -n $pid && -n $address ]] || continue
-    window_of_pid[$pid]=$address
+    window_of_pid[$pid]=$address$'\t'$workspace
   done < <(printf '%s' "$clients" |
-    jq -r '.[] | select(.pid > 0) | "\(.pid)\t\(.address)"' 2>/dev/null)
+    jq -r '.[] | select(.pid > 0)
+           | "\(.pid)\t\(.address)\t\(.workspace.name // "")"' 2>/dev/null)
 
   ((${#window_of_pid[@]})) || return 0
 
@@ -87,10 +89,10 @@ window_map() {
   declare -A seen=()
 
   emit() {
-    local session="$1" address="$2"
+    local session="$1" window="$2"
     [[ -n ${seen[$session]-} ]] && return 0
     seen[$session]=1
-    printf '%s\t%s\n' "$session" "$address"
+    printf '%s\t%s\n' "$session" "$window"
   }
 
   # Read a session name out of a command line that runs herdr. Prints nothing
@@ -227,10 +229,22 @@ cmd_open() {
   local name="${1-}"
   valid_session_name "$name" || die "not a session name"
 
-  local address
-  address=$(window_map | awk -F'\t' -v want="$name" '$1 == want { print $2; exit }')
+  local address workspace
+  IFS=$'\t' read -r address workspace < <(
+    window_map | awk -F'\t' -v want="$name" '$1 == want { print $2 "\t" $3; exit }')
 
-  if [[ -n $address && -n ${address//[!0-9a-fx]/} ]]; then
+  # Both values are spliced into a Lua expression, so they are checked for
+  # shape first rather than escaped. A window address is hex; a workspace name
+  # is a number, a name, or "special:<name>". Anything else means the window
+  # is not what we think it is, and focusing is not worth guessing at.
+  if [[ $address =~ ^0x[0-9a-fA-F]+$ ]]; then
+    # A window on another workspace stays hidden however hard it is focused:
+    # focus picks the window, it does not bring its workspace into view. So
+    # switch first, then focus - which also lands on the right monitor when
+    # the workspace lives on the other screen.
+    if [[ $workspace =~ ^(special:)?[A-Za-z0-9_-]{1,32}$ ]]; then
+      hyprctl dispatch "hl.dsp.focus({ workspace = '$workspace' })" >/dev/null 2>&1
+    fi
     # Quattro's hyprctl parses its argument as Lua, so `dispatch focuswindow`
     # is a syntax error now. The address is single-quoted inside the Lua call.
     hyprctl dispatch "hl.dsp.focus({ window = 'address:$address' })" >/dev/null 2>&1
@@ -238,8 +252,16 @@ cmd_open() {
     return 0
   fi
 
-  # No window: open one. The session keeps its own state, so the directory
-  # only matters the very first time a name is used.
+  # No window: open one. A numbered session is named after the Hyprland
+  # workspace it belongs to, so it is opened there rather than on top of
+  # whatever is in front of you - otherwise "Workspace 4" would land on
+  # workspace 7 and the name would stop meaning anything.
+  if [[ $name =~ ^[0-9]{1,3}$ ]]; then
+    hyprctl dispatch "hl.dsp.focus({ workspace = '$name' })" >/dev/null 2>&1
+  fi
+
+  # The session keeps its own state, so the directory only matters the very
+  # first time a name is used.
   local -a launch=(setsid uwsm-app -- xdg-terminal-exec
     "--app-id=$APP_ID" "--dir=$HOME" -- herdr)
   [[ $name == default ]] || launch+=(--session "$name")
