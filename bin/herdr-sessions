@@ -9,13 +9,15 @@
 #
 #   list          every session, running or stopped
 #   open <name>   focus the window showing that session, or open one
-#   stop <name>   stop the session's server
+#   focus <name> <pane>
+#                 the same, but land on one agent's pane inside it
+#   kill <name>   signal the session's server until it is gone
 #   delete <name> remove a stopped session's directory
 #   demo on|off   invented sessions instead of yours, for screenshots
 #
 # Demo mode exists so a screenshot never carries real project names or agent
 # titles, and so it looks the same in a year. Every write is a no-op while it
-# is on, so a click during a shoot cannot stop a real server.
+# is on, so a click during a shoot cannot kill a real server.
 #
 # Agent states are herdr's own: `blocked` means it recognised an approval or
 # question on screen, so that agent is waiting on you. `done` is idle after
@@ -51,6 +53,13 @@ json_string() {
 # think it is: refuse it rather than tidy it up.
 valid_session_name() {
   [[ "${1-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+}
+
+# Pane ids are herdr's own - "w1:p2" - and come back from the panel the same
+# way session names do, so they get the same treatment: checked for shape
+# before they reach a command line, refused rather than repaired.
+valid_pane_id() {
+  [[ "${1-}" =~ ^[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{1,32}$ ]]
 }
 
 # A directory someone else can write to is a directory that can hand this
@@ -99,9 +108,9 @@ cmd_demo() {
 demo_list() {
   cat <<'DEMO'
 {"ok":true,"error":"","sessions":[
-{"name":"default","isDefault":true,"running":true,"version":"0.8.2","agents":2,"working":1,"blocked":0,"idle":1,"done":0,"workspaces":2,"projects":["checkout-service","design-tokens"],"agentList":[{"title":"Rewrite the receipt formatter","status":"working"},{"title":"Token names for the new palette","status":"idle"}],"windowAddress":"0x1"},
-{"name":"3","isDefault":false,"running":true,"version":"0.8.2","agents":1,"working":0,"blocked":1,"idle":0,"done":0,"workspaces":1,"projects":["billing-api"],"agentList":[{"title":"Drop the legacy invoice table","status":"blocked"}],"windowAddress":"0x2"},
-{"name":"5","isDefault":false,"running":true,"version":"0.8.2","agents":2,"working":0,"blocked":0,"idle":0,"done":2,"workspaces":1,"projects":["docs-site"],"agentList":[{"title":"Upgrade the search index","status":"done"},{"title":"Fix the broken anchor links","status":"done"}],"windowAddress":""},
+{"name":"default","isDefault":true,"running":true,"version":"0.8.2","agents":2,"working":1,"blocked":0,"idle":1,"done":0,"workspaces":2,"projects":["checkout-service","design-tokens"],"agentList":[{"title":"Rewrite the receipt formatter","status":"working","pane":"w1:p1"},{"title":"Token names for the new palette","status":"idle","pane":"w2:p1"}],"windowAddress":"0x1"},
+{"name":"3","isDefault":false,"running":true,"version":"0.8.2","agents":1,"working":0,"blocked":1,"idle":0,"done":0,"workspaces":1,"projects":["billing-api"],"agentList":[{"title":"Drop the legacy invoice table","status":"blocked","pane":"w1:p1"}],"windowAddress":"0x2"},
+{"name":"5","isDefault":false,"running":true,"version":"0.8.2","agents":2,"working":0,"blocked":0,"idle":0,"done":2,"workspaces":1,"projects":["docs-site"],"agentList":[{"title":"Upgrade the search index","status":"done","pane":"w1:p1"},{"title":"Fix the broken anchor links","status":"done","pane":"w1:p2"}],"windowAddress":""},
 {"name":"9","isDefault":false,"running":false,"version":"","agents":0,"working":0,"blocked":0,"idle":0,"done":0,"workspaces":0,"projects":[],"agentList":[],"windowAddress":""}
 ],"running":3,"agents":5,"blocked":1,"done":2,"working":1}
 DEMO
@@ -261,22 +270,47 @@ cmd_list() {
   # everything else in this function put together. The key is safe to splice
   # in unquoted because valid_session_name has already refused anything but
   # letters, digits, dot, dash and underscore.
-  local snapshots='' name is_default running snap
-  while IFS=$'\t' read -r name is_default running; do
+  # A session that is not running has no server to ask, but it has not
+  # forgotten anything either: herdr writes the layout to session.json, and
+  # that file still names the workspaces and the directory each one was opened
+  # in. Reading it is what makes a stopped row say what it is holding rather
+  # than only that it is down - the difference between a session worth starting
+  # back up and a name left over from an afternoon.
+  local snapshots='' saved='' name is_default running dir snap labels
+  while IFS=$'\t' read -r name is_default running dir; do
     [[ -n $name ]] || continue
-    [[ $running == true ]] || continue
     valid_session_name "$name" || continue
-    snap=$(snapshot_for "$name" "$is_default") || continue
-    snapshots+="${snapshots:+,}\"$name\":$snap"
+
+    if [[ $running == true ]]; then
+      snap=$(snapshot_for "$name" "$is_default") || continue
+      snapshots+="${snapshots:+,}\"$name\":$snap"
+      continue
+    fi
+
+    readable_file "$dir/session.json" || continue
+    # The label herdr shows is the name a workspace was given, and the last
+    # part of the directory it was opened in otherwise - the same two, in the
+    # same order, that a running snapshot resolves to its label.
+    labels=$(jq -c --arg home "$HOME" '[.workspaces[]?
+                     | (.custom_name
+                        // (if (.identity_cwd // "") == $home then "~"
+                            else (.identity_cwd // "" | split("/") | last) end))
+                     | select(. != null and . != "")]
+                    | unique' -- "$dir/session.json" 2>/dev/null) || continue
+    [[ -n $labels ]] || continue
+    saved+="${saved:+,}\"$name\":$labels"
   done < <(printf '%s' "$sessions_json" |
-    jq -r '.sessions[]? | "\(.name)\t\(.default // false)\t\(.running // false)"')
+    jq -r '.sessions[]? | "\(.name)\t\(.default // false)\t\(.running // false)\t\(.session_dir // "")"')
   snapshots="{$snapshots}"
+  saved="{$saved}"
+  printf '%s' "$saved" | jq -e . >/dev/null 2>&1 || saved="{}"
   # A truncated or unparseable reply from any one server must not take the
   # whole list down with it.
   printf '%s' "$snapshots" | jq -e . >/dev/null 2>&1 || snapshots='{}'
 
   printf '%s' "$sessions_json" | jq -c \
     --argjson snapshots "$snapshots" \
+    --argjson saved "$saved" \
     --arg windows "$windows" '
     ($windows | split("\n") | map(select(length > 0) | split("\t"))
       | map({key: .[0], value: .[1]}) | from_entries) as $win
@@ -297,10 +331,24 @@ cmd_list() {
            workspaces: (($snap.workspaces // []) | length),
            agentList: ($agents
                        | map({title: (.terminal_title_stripped // .terminal_title // ""),
-                              status: (.agent_status // "unknown")})
-                       | map(select(.title != ""))),
-           projects: (($snap.workspaces // []) | map(.label // "")
-                      | map(select(length > 0)) | unique),
+                              status: (.agent_status // "unknown"),
+                              pane: (.pane_id // "")})
+                       | map(select(.title != ""))
+                       # The attention queue herdr uses itself, the order its
+                       # own agent panel takes when agent_panel_sort is set to
+                       # priority: what wants an answer, then what finished
+                       # unseen, then what is busy, then what is only waiting
+                       # for you to type. Sorting is stable in jq, so agents
+                       # sharing a state keep the order herdr laid them out in.
+                       | sort_by(if   .status == "blocked" then 0
+                                 elif .status == "done"    then 1
+                                 elif .status == "working" then 2
+                                 elif .status == "idle"    then 3
+                                 else 4 end)),
+           projects: (if (.running // false)
+                      then (($snap.workspaces // []) | map(.label // "")
+                            | map(select(length > 0)) | unique)
+                      else ($saved[$name] // []) end),
            windowAddress: ($win[$name] // "")
          }]
     | sort_by([(if .isDefault then 0 else 1 end),
@@ -319,9 +367,10 @@ cmd_list() {
 
 # ------------------------------------------------------------- open a session
 
-cmd_open() {
-  local name="${1-}"
-  valid_session_name "$name" || die "not a session name"
+# Bring up the window showing a session, or start one. Returns 0 once
+# something has been done, 1 when no terminal could be started.
+show_session() {
+  local name="$1"
 
   local address workspace
   IFS=$'\t' read -r address workspace < <(
@@ -342,7 +391,6 @@ cmd_open() {
     # Quattro's hyprctl parses its argument as Lua, so `dispatch focuswindow`
     # is a syntax error now. The address is single-quoted inside the Lua call.
     hyprctl dispatch "hl.dsp.focus({ window = 'address:$address' })" >/dev/null 2>&1
-    printf '{"ok":true}\n'
     return 0
   fi
 
@@ -354,29 +402,124 @@ cmd_open() {
     hyprctl dispatch "hl.dsp.focus({ workspace = '$name' })" >/dev/null 2>&1
   fi
 
-  # The session keeps its own state, so the directory only matters the very
-  # first time a name is used.
-  local -a launch=(setsid uwsm-app -- xdg-terminal-exec
-    "--app-id=$APP_ID" "--dir=$HOME" -- herdr)
-  [[ $name == default ]] || launch+=(--session "$name")
+  # `herdr --session <name>` attaches to the server that is already running
+  # under that name and only starts one when there is none, so the same
+  # command covers a running session with no window and a stopped one. The
+  # session keeps its own state, so the directory only matters the very first
+  # time a name is used.
+  local -a herdr_cmd=(herdr)
+  [[ $name == default ]] || herdr_cmd+=(--session "$name")
 
-  if command -v uwsm-app >/dev/null 2>&1 && command -v xdg-terminal-exec >/dev/null 2>&1; then
-    "${launch[@]}" >/dev/null 2>&1 &
-    disown
-    printf '{"ok":true}\n'
-    return 0
+  # Foot by name rather than through xdg-terminal-exec: the app id is what
+  # window rules and the window matching above key off, and a terminal chosen
+  # from the desktop's list is not guaranteed to take one. xdg-terminal-exec
+  # stays as the fallback for a machine without foot.
+  local -a launch=()
+  if command -v uwsm-app >/dev/null 2>&1; then
+    launch=(setsid uwsm-app --)
+  else
+    launch=(setsid)
   fi
 
-  die "no terminal launcher available"
+  if command -v foot >/dev/null 2>&1; then
+    launch+=(foot "--app-id=$APP_ID" "--working-directory=$HOME" -e "${herdr_cmd[@]}")
+  elif command -v xdg-terminal-exec >/dev/null 2>&1; then
+    launch+=(xdg-terminal-exec "--app-id=$APP_ID" "--dir=$HOME" -- "${herdr_cmd[@]}")
+  else
+    return 1
+  fi
+
+  "${launch[@]}" >/dev/null 2>&1 &
+  disown
+  return 0
 }
 
-# ------------------------------------------------------------ stop / delete
-
-cmd_stop() {
+cmd_open() {
   local name="${1-}"
   valid_session_name "$name" || die "not a session name"
-  [[ $name == default ]] && die "the default session is not stopped from here"
-  herdr session stop -- "$name" >/dev/null 2>&1 || true
+  show_session "$name" || die "no terminal available"
+  printf '{"ok":true}\n'
+}
+
+# Land on one agent rather than on whatever the session was last showing.
+#
+# The pane is focused over the socket first, so the server has already moved
+# by the time the window comes up - and it moves even when there is no window
+# at all, which is what makes this work on a session that has to be opened.
+# `herdr agent focus` switches workspace and tab inside the session on its
+# own; the hyprctl half below is only about which window is in front of you.
+cmd_focus() {
+  local name="${1-}" pane="${2-}"
+  valid_session_name "$name" || die "not a session name"
+  valid_pane_id "$pane" || die "not a pane id"
+
+  # No `--` before the pane id: herdr does not take one, and valid_pane_id has
+  # already refused anything but two runs of letters, digits, dash and
+  # underscore around a colon - so nothing here can arrive looking like an
+  # option in the first place.
+  if [[ $name == default ]]; then
+    herdr agent focus "$pane" >/dev/null 2>&1 || true
+  else
+    herdr --session "$name" agent focus "$pane" >/dev/null 2>&1 || true
+  fi
+
+  show_session "$name" || die "no terminal available"
+  printf '{"ok":true}\n'
+}
+
+# ------------------------------------------------------------ kill / delete
+
+# Which process is serving a session. Every herdr server has the same command
+# line - a bare `herdr server`, with no session name on it - so the socket it
+# is listening on is the only thing that tells them apart. `ss` is what maps a
+# listening unix socket back to the process holding it.
+server_pid_for() {
+  local socket="$1" pid
+  [[ -n $socket ]] || return 1
+  pid=$(ss -lpxn 2>/dev/null | awk -v want="$socket " '
+    index($0, want) == 0 { next }
+    match($0, /pid=[0-9]+/) { print substr($0, RSTART + 4, RLENGTH - 4); exit }')
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+
+  # A pid read out of another tool's output is a pid to check before signalling.
+  # It has to still be a herdr server: `ss` was run a moment ago, and a pid that
+  # exited since then belongs to whatever was started next.
+  local comm=""
+  { read -r comm < "/proc/$pid/comm"; } 2>/dev/null || return 1
+  [[ $comm == herdr ]] || return 1
+  grep -qz server "/proc/$pid/cmdline" 2>/dev/null || return 1
+
+  printf '%s' "$pid"
+}
+
+socket_of() {
+  herdr session list --json 2>/dev/null |
+    jq -r --arg name "$1" '.sessions[]? | select(.name == $name) | .socket_path // ""' 2>/dev/null
+}
+
+# How a server is ended here, and the only way. `herdr session stop` asks over
+# the socket, so a server too wedged to read that socket never hears it and the
+# button looks broken at exactly the moment it is needed. A signal reaches the
+# process either way, so there is nothing for the tidy route to be better at.
+#
+# TERM first and KILL only if that was not enough: a server given the chance to
+# close its sockets leaves no stale ones behind, and on a healthy server the
+# first signal is all it takes. The default session is killed like any other.
+cmd_kill() {
+  local name="${1-}"
+  valid_session_name "$name" || die "not a session name"
+
+  local pid
+  pid=$(server_pid_for "$(socket_of "$name")") || die "no running server for that session"
+
+  kill -TERM "$pid" 2>/dev/null || true
+  local i
+  for ((i = 0; i < 10; i++)); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+
   printf '{"ok":true}\n'
 }
 
@@ -384,7 +527,9 @@ cmd_delete() {
   local name="${1-}"
   valid_session_name "$name" || die "not a session name"
   [[ $name == default ]] && die "the default session is not deleted from here"
-  herdr session delete -- "$name" >/dev/null 2>&1 || true
+  # No `--` before the name: herdr's argument parser does not take one, and a
+  # session name has already been checked against the shape above.
+  herdr session delete "$name" >/dev/null 2>&1 || true
   printf '{"ok":true}\n'
 }
 
@@ -397,7 +542,8 @@ case "${1:-list}" in
   # Every write is a no-op while the demo is on, so a click during a shoot
   # cannot reach a real session.
   open) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_open "${1-}"; fi ;;
-  stop) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_stop "${1-}"; fi ;;
+  focus) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_focus "${1-}" "${2-}"; fi ;;
+  kill) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_kill "${1-}"; fi ;;
   delete) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_delete "${1-}"; fi ;;
   demo) shift; cmd_demo "${1-}" ;;
   *) die "unknown command" ;;

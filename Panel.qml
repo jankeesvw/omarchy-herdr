@@ -10,7 +10,7 @@ import qs.Ui
 // Herdr keeps one server per named session. They are easy to start and never
 // stop by themselves - closing a window detaches, it does not end the session
 // - so they pile up unseen. The bar shows the count; the panel names them,
-// says which project and how many agents each one holds, and opens or stops
+// says which project and how many agents each one holds, and opens or kills
 // one on a click.
 //
 // A session shows at most one window, because two windows on one session
@@ -18,6 +18,11 @@ import qs.Ui
 // session, wherever it is, and only start a new one when there is none.
 // `bin/herdr-sessions` does that matching by reading the herdr client's own
 // command line off the processes behind each Hyprland window.
+//
+// The agent lines under a session are click targets of their own, one step
+// further in: the pane is focused inside the server before the window is
+// brought up, so a click lands on the piece of work you were reading rather
+// than on wherever that session happened to be left.
 //
 // Project names are directory names and session names are whatever was passed
 // to `herdr --session`, so every Text carries `textFormat: Text.PlainText`.
@@ -42,8 +47,12 @@ Panel {
   readonly property string iconServer: "\uF233"
   readonly property string iconDot: "\uF111"
   readonly property string iconOpen: "\uF2D2"
-  readonly property string iconStop: "\uF011"
   readonly property string iconTrash: "\uF1F8"
+  // nf-md-skull, U+F068C. Written as its surrogate pair because a `\u`
+  // escape takes exactly four hex digits, and this codepoint is past the
+  // point where four is enough - `"\uF068C"` is a different glyph followed
+  // by the letter C.
+  readonly property string iconKill: "\uDB81\uDE8C"
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color accent: Color.accent
@@ -66,6 +75,9 @@ Panel {
   property string errorText: ""
   // Session the script is currently acting on, so its row can dim.
   property string pendingName: ""
+  // The session the kill dialog is asking about, held while it is open.
+  property var killTarget: null
+  property bool confirmOpen: false
   property int cursor: -1
 
   readonly property int badgeCount: runningCount
@@ -95,6 +107,12 @@ Panel {
     return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(name))
   }
 
+  // Pane ids are herdr's own opaque handles - "w1:p2" - and travel back out
+  // as an argument the same way names do.
+  function validPane(pane) {
+    return /^[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{1,32}$/.test(String(pane))
+  }
+
   // Markup stripped rather than escaped: the bar tooltip is the shell's own
   // component, so `textFormat` there is not ours to set.
   function plain(s) {
@@ -107,10 +125,12 @@ Panel {
     listProc.running = true
   }
 
-  function run(action, name) {
+  function run(action, name, extra) {
     if (!validName(name) || actionProc.running) return
     pendingName = name
-    actionProc.command = [root.script, action, name]
+    var command = [root.script, action, name]
+    if (extra !== undefined && extra !== "") command.push(extra)
+    actionProc.command = command
     actionProc.running = true
   }
 
@@ -124,11 +144,82 @@ Panel {
     close()
   }
 
-  // Stopping ends the server; a session that was already stopped is deleted
-  // instead, which is what clears it out of the list for good.
+  // One step further in than openSession: the agent's own pane is focused
+  // inside the server before the window comes up, so the click lands on the
+  // work you were reading rather than on wherever that session was left.
+  //
+  // Focusing is also what marks a finished agent as seen - herdr turns `done`
+  // back into `idle` the moment its pane is targeted - so clicking the line
+  // that says "done" is what clears it.
+  //
+  // A pane herdr has not named yet falls back to opening the session, which
+  // is what the click would have done anyway.
+  function focusAgent(session, agent) {
+    if (!session || !agent) return
+    if (!validPane(agent.pane)) { openSession(session); return }
+    if (!validName(session.name)) return
+    run("focus", session.name, agent.pane)
+    close()
+  }
+
+  // Deleting throws away a session that is already stopped - its directory and
+  // the state herdr kept in it - which is what clears it out of the list for
+  // good. A running server is killed rather than deleted; the two never apply
+  // to the same row. The shared session is herdr's own and is not deleted from
+  // here at all.
   function removeSession(session) {
-    if (!session || session.isDefault) return
-    run(session.running ? "stop" : "delete", session.name)
+    if (!session || session.isDefault || session.running) return
+    run("delete", session.name)
+  }
+
+  // How a running server is ended here, and the only way: `herdr session stop`
+  // asks over herdr's own socket, so a server too wedged to read that socket
+  // never hears the request, and the button that sent it looked broken at
+  // exactly the moment you needed it. Signalling the process works either way,
+  // so there is no reason to keep both.
+  //
+  // The shared session is killed like any other. It wedges like any other.
+  function killSession(session) {
+    if (!session || !session.running || !validName(session.name)) return
+    run("kill", session.name)
+  }
+
+  // Killing is the one thing here that cannot be taken back: the server is
+  // gone and so is everything that was running inside it, without anything
+  // being asked to finish first. Opening a session, focusing an agent and even
+  // deleting a stopped session are all recoverable or trivial by comparison,
+  // so this is the only action that stops to ask.
+  //
+  // The dialog opens on Cancel rather than on the confirming side, which is
+  // ConfirmDialog's own default: a dialog that destroys something on a
+  // reflexive Enter is worse than no dialog, because it trains the reflex.
+  function askKill(session) {
+    if (!session || !session.running || !validName(session.name)) return
+    killTarget = session
+    killConfirm.selectedIndex = 0
+    confirmOpen = true
+    Qt.callLater(function() { confirmKeys.forceActiveFocus() })
+  }
+
+  // Focus goes back to the panel by hand on the way out. The key catcher gave
+  // it up when the dialog took over, and nothing hands it back on its own -
+  // the panel would still be open with the arrow keys doing nothing.
+  function closeKill() {
+    confirmOpen = false
+    killTarget = null
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  function confirmKill() {
+    var session = killTarget
+    closeKill()
+    killSession(session)
+  }
+
+  function killMessage() {
+    if (!killTarget) return ""
+    return "Kill the server for " + sessionLabel(killTarget)
+      + "? Nothing running inside it is asked to stop first."
   }
 
   function moveCursor(delta) {
@@ -155,16 +246,24 @@ Panel {
     return session.name
   }
 
+  // A stopped session names what it is holding rather than only saying it is
+  // down: herdr keeps the layout in session.json, so the workspaces and the
+  // directories they were opened in survive the server. That is the difference
+  // between a session worth starting back up and a name left over from an
+  // afternoon, and it is not visible from the word "stopped".
   function subtitleFor(session) {
     if (!session) return ""
-    if (!session.running) return "stopped"
     var projects = session.projects || []
     if (projects.length > 0) return projects.join("  ·  ")
-    return "no workspaces yet"
+    return session.running ? "no workspaces yet" : "nothing saved"
   }
 
+  // "stopped" belongs in the right-hand column with the agent counts and the
+  // agent states, not in the subtitle: that column is where the panel says
+  // what something is doing, and a stopped server is doing nothing.
   function countLabel(session) {
-    if (!session || !session.running) return ""
+    if (!session) return ""
+    if (!session.running) return "stopped"
     var n = session.agents || 0
     if (n === 0) return "no agents"
     return n === 1 ? "1 agent" : n + " agents"
@@ -193,18 +292,14 @@ Panel {
     return stripped !== "" ? stripped : s
   }
 
-  // Three is what fits before a session stops being a row and starts being a
-  // list of its own. The rest are counted rather than named.
-  readonly property int titlesShown: 3
-
+  // Every agent, however many there are and wherever herdr keeps them: a pane
+  // in a second tab counts the same as one sitting in front of you, and an
+  // agent summarised as "+1 more" is exactly the one you would have wanted to
+  // read. The list scrolls when it has to; that is what the card's height cap
+  // is for.
   function agentsOf(session) {
     if (!session) return []
-    return (session.agentList || []).slice(0, root.titlesShown)
-  }
-
-  function hiddenAgents(session) {
-    if (!session) return 0
-    return Math.max(0, (session.agentList || []).length - root.titlesShown)
+    return session.agentList || []
   }
 
   function agentColor(status) {
@@ -214,14 +309,23 @@ Panel {
     return Qt.darker(root.foreground, 1.9)
   }
 
-  // The two states that are news: one wants an answer, the other finished
-  // something while you were not looking. Everything else is an agent minding
-  // its own business and gets no label at all - a badge on every row is a
-  // badge on none.
+  // Every agent says what it is doing, in herdr's own terms: `blocked` is an
+  // approval or a question on screen, `done` is work that finished while you
+  // were looking elsewhere, `idle` is a prompt waiting for you to type - which
+  // reads better as "ready", because "idle" sounds like a problem and it is
+  // the ordinary resting state.
+  //
+  // These run down the right edge in one column, so the question is not "which
+  // line has a label" but "what does that column say" - one glance instead of
+  // a scan. Two of them are still news and two are not, and that is carried by
+  // weight and colour rather than by leaving a word out: the ones that want
+  // something are bold and coloured, the rest are quiet grey.
   function agentNote(status) {
     if (status === "blocked") return "needs you"
     if (status === "done") return "done"
-    return ""
+    if (status === "working") return "working"
+    if (status === "idle") return "ready"
+    return "unknown"
   }
 
   function agentWants(status) {
@@ -398,6 +502,10 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // While the dialog is up the panel's own keys are off, so Escape closes
+      // the question rather than the whole panel, and Enter answers it rather
+      // than opening whatever the cursor was on.
+      blocked: root.confirmOpen
       onCloseRequested: root.close()
       onMoveRequested: function(dx, dy) { if (dy !== 0) root.moveCursor(dy) }
       // Only activateRequested, never returnRequested as well: Enter fires
@@ -406,6 +514,7 @@ Panel {
       onTextKey: function(t) {
         var onCursor = root.cursor >= 0 && root.cursor < root.sessions.length
         if (t === "o" && onCursor) root.openSession(root.sessions[root.cursor])
+        else if (t === "k" && onCursor) root.askKill(root.sessions[root.cursor])
         else if (t === "x" && onCursor) root.removeSession(root.sessions[root.cursor])
         else if (t === "r") root.refresh()
       }
@@ -599,11 +708,33 @@ Panel {
                   // A row rather than a Row: the note is right-aligned so the
                   // titles keep one left edge down the whole panel, and the
                   // title elides into whatever is left between the two.
+                  //
+                  // Each line is its own click target, so the panel is a way
+                  // into a particular piece of work rather than into a
+                  // session. A little taller than the text it holds, because
+                  // three lines of caption text stacked tight is not
+                  // something you can reliably hit.
                   Item {
                     id: agentRow
                     required property var modelData
                     width: agentColumn.width
-                    height: agentTitle.implicitHeight
+                    height: agentTitle.implicitHeight + Style.space(4)
+
+                    // Bleeds past the text on both sides so the highlight
+                    // reads as a row of the list rather than a box drawn
+                    // around a sentence.
+                    Rectangle {
+                      anchors.fill: parent
+                      anchors.leftMargin: -Style.space(4)
+                      anchors.rightMargin: -Style.space(4)
+                      radius: Style.cornerRadius
+                      color: agentMouse.containsMouse
+                        ? Qt.rgba(root.foreground.r, root.foreground.g,
+                                  root.foreground.b, 0.13)
+                        : "transparent"
+
+                      Behavior on color { ColorAnimation { duration: 80 } }
+                    }
 
                     Text {
                       id: agentDot
@@ -632,6 +763,7 @@ Panel {
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
                       color: root.agentWants(agentRow.modelData.status)
+                          || agentMouse.containsMouse
                         ? root.foreground
                         : Qt.darker(root.foreground, 1.35)
                     }
@@ -645,21 +777,29 @@ Panel {
                       textFormat: Text.PlainText
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
-                      font.bold: true
+                      // Only the two that are news carry weight. Bold on every
+                      // line would put the column back where it started.
+                      font.bold: root.agentWants(agentRow.modelData.status)
                       color: root.agentColor(agentRow.modelData.status)
+                    }
+
+                    // Last child, so it is above the labels rather than
+                    // under them. It takes the click instead of the row
+                    // behind it, and keeps that row's cursor state honest -
+                    // hovering a child steals hover from the parent, which
+                    // would otherwise drop the row highlight the moment you
+                    // reached for an agent inside it.
+                    MouseArea {
+                      id: agentMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onContainsMouseChanged: if (containsMouse) root.cursor = row.index
+                      onClicked: root.focusAgent(row.modelData, agentRow.modelData)
                     }
                   }
                 }
 
-                Text {
-                  width: parent.width
-                  visible: root.hiddenAgents(row.modelData) > 0
-                  text: "+" + root.hiddenAgents(row.modelData) + " more"
-                  textFormat: Text.PlainText
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  color: Qt.darker(root.foreground, 2.0)
-                }
               }
 
               // The buttons keep their slot on every row, so the names stay
@@ -685,19 +825,34 @@ Panel {
                   onClicked: root.openSession(row.modelData)
                 }
 
-                // The shared session is not stopped from here: it is the one
-                // herdr expects to keep, and its key is on the keyboard.
-                // The slot stays so the rows line up.
+                // One destructive slot, holding whichever of the two applies
+                // to this row: a running server is killed, a stopped session is
+                // deleted, and nothing is ever both. Sharing the slot rather
+                // than giving each its own keeps the names in one column and
+                // leaves no gap where the other button would have been.
+                //
+                // The shared session is herdr's own, so it can be killed but
+                // never deleted - hence the empty slot there once it is down.
                 Item {
-                  width: stopButton.width
-                  height: stopButton.height
+                  width: killButton.width
+                  height: killButton.height
 
                   PanelActionButton {
-                    id: stopButton
-                    visible: !row.modelData.isDefault
-                    iconText: row.modelData.running ? root.iconStop : root.iconTrash
-                    tooltipText: row.modelData.running
-                      ? "Stop this server" : "Delete this session"
+                    id: killButton
+                    visible: row.modelData.running
+                    iconText: root.iconKill
+                    tooltipText: "Kill this server"
+                    foreground: Qt.darker(root.foreground, 1.4)
+                    hoverColor: root.urgent
+                    fontFamily: root.fontFamily
+                    fontSize: Style.font.iconSmall
+                    onClicked: root.askKill(row.modelData)
+                  }
+
+                  PanelActionButton {
+                    visible: !row.modelData.running && !row.modelData.isDefault
+                    iconText: root.iconTrash
+                    tooltipText: "Delete this session"
                     foreground: Qt.darker(root.foreground, 1.4)
                     hoverColor: root.urgent
                     fontFamily: root.fontFamily
@@ -729,6 +884,45 @@ Panel {
             font.pixelSize: Style.font.caption
             color: Qt.darker(root.foreground, 1.8)
           }
+        }
+      }
+
+      // ------------------------------------------------------- confirm
+
+      // The dialog carries its own key handling, because PanelKeyCatcher
+      // defines `Keys.onPressed` in the component itself: declaring it again
+      // out here would replace that handler rather than run before it, and
+      // every arrow key in the panel with it. So the catcher is blocked
+      // instead and this takes the focus while the question is up.
+      //
+      // Only alive while it is asking - an invisible item cannot hold focus,
+      // which is what keeps the panel's own keys working the rest of the time.
+      Item {
+        id: confirmKeys
+        anchors.fill: parent
+        z: 10
+        visible: root.confirmOpen
+        focus: root.confirmOpen
+
+        Keys.priority: Keys.BeforeItem
+        Keys.onPressed: function(event) {
+          if (killConfirm.handleKey(event)) event.accepted = true
+        }
+
+        ConfirmDialog {
+          id: killConfirm
+          anchors.fill: parent
+          opened: root.confirmOpen
+          // ConfirmDialog draws the message with the shell's own Text, so
+          // `textFormat` there is not ours to set and the session name - which
+          // is whatever was passed to `herdr --session` - is stripped instead.
+          message: root.plain(root.killMessage())
+          confirmText: "Kill"
+          background: Color.background
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onCanceled: root.closeKill()
+          onConfirmed: root.confirmKill()
         }
       }
     }
