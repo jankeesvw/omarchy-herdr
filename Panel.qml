@@ -78,6 +78,42 @@ Panel {
   // The session the kill dialog is asking about, held while it is open.
   property var killTarget: null
   property bool confirmOpen: false
+
+  // Which agent spoke last, as "<session>\u0000<pane>", and every agent that
+  // was already asking when we last looked.
+  //
+  // Herdr plays a sound when an agent starts wanting something, and that
+  // sound says only that it happened, not which of them it was. This is the
+  // panel's answer to that: whoever turned blocked or done since the previous
+  // refresh gets a dot that blinks, so the noise you just heard has a face.
+  //
+  // Worked out by comparing polls rather than by trusting a number in the
+  // payload, because herdr's state_change_seq is documented as a sort field
+  // and not as a clock, so whether it counts per server or per agent is not
+  // something to build on. It is only used to break a tie when two agents
+  // start asking within the same poll.
+  property string attentionKey: ""
+  property var wantingBefore: ({})
+  // The first poll has nothing to compare against, so every agent that is
+  // already waiting would look like it just spoke. That first answer only
+  // sets the baseline: after a shell restart nothing blinks until something
+  // actually changes, which is the honest thing for a signal that means
+  // "this just happened".
+  property bool attentionPrimed: false
+  // Whether the cursor has been put on the best row for this opening of the
+  // panel. Without it every refresh would drag the cursor back there, three
+  // seconds after you moved it.
+  property bool cursorPlaced: false
+
+  // Where the cursor is across the row: 0 is the row itself, 1 the open
+  // button, 2 the destructive one. Right and Tab walk out to the buttons,
+  // Left walks back. Kept as a number rather than a per-row object so moving
+  // up and down holds its place in the row: walking a column of kill buttons
+  // is a thing you do on purpose.
+  readonly property int columnRow: 0
+  readonly property int columnOpen: 1
+  readonly property int columnDestroy: 2
+  property int column: 0
   property int cursor: -1
 
   readonly property int badgeCount: runningCount
@@ -222,18 +258,165 @@ Panel {
       + "? Nothing running inside it is asked to stop first."
   }
 
-  function moveCursor(delta) {
-    if (sessions.length === 0) return
-    var next = cursor + delta
-    if (next < 0) next = 0
-    if (next > sessions.length - 1) next = sessions.length - 1
-    cursor = next
-    list.positionViewAtIndex(next, ListView.Contain)
+  // What the arrow keys walk: the agents, in the order they are drawn, not the
+  // servers holding them. A server is a place, an agent is the work, and the
+  // work is what you came to reach.
+  //
+  // A session with no agents still gets a row of its own, or a stopped session
+  // and an empty server would drop out of the keyboard entirely and there
+  // would be no way to open or delete one without the mouse.
+  readonly property var navRows: {
+    var rows = []
+    for (var i = 0; i < sessions.length; i++) {
+      var agents = sessions[i].agentList || []
+      if (agents.length === 0) {
+        rows.push({ sessionIndex: i, agentIndex: -1 })
+        continue
+      }
+      for (var j = 0; j < agents.length; j++)
+        rows.push({ sessionIndex: i, agentIndex: j })
+    }
+    return rows
   }
 
+  function rowAt(index) {
+    if (index < 0 || index >= navRows.length) return null
+    return navRows[index]
+  }
+
+  function sessionAt(index) {
+    var row = rowAt(index)
+    return row ? sessions[row.sessionIndex] : null
+  }
+
+  function agentAt(index) {
+    var row = rowAt(index)
+    if (!row || row.agentIndex < 0) return null
+    return (sessions[row.sessionIndex].agentList || [])[row.agentIndex] || null
+  }
+
+  // How loudly an agent is asking, lowest number first, matching the order the
+  // script already sorts them in. Used to pick where the cursor starts.
+  function attentionRank(status) {
+    if (status === "blocked") return 0
+    if (status === "done") return 1
+    if (status === "working") return 2
+    if (status === "idle") return 3
+    return 4
+  }
+
+  // Opening the panel puts the cursor on the agent that wants the most, not on
+  // the first row: the reason you opened it is almost never the top of the
+  // list. Ties go to whoever is drawn first, which is herdr's own order.
+  function bestRow() {
+    var best = -1
+    var bestRank = 99
+    for (var i = 0; i < navRows.length; i++) {
+      var agent = agentAt(i)
+      if (!agent) continue
+      var rank = attentionRank(agent.status)
+      if (rank < bestRank) { bestRank = rank; best = i }
+    }
+    return best >= 0 ? best : (navRows.length > 0 ? 0 : -1)
+  }
+
+  // The destructive button is not on every row: a stopped shared session has
+  // nothing to kill and nothing that may be deleted, so its slot is empty and
+  // the cursor must step over it rather than park on a dead control.
+  function lastColumnFor(session) {
+    if (!session) return root.columnRow
+    if (session.running) return root.columnDestroy
+    return session.isDefault ? root.columnOpen : root.columnDestroy
+  }
+
+  function clampColumn() {
+    var last = lastColumnFor(sessionAt(cursor))
+    if (column > last) column = last
+    if (column < root.columnRow) column = root.columnRow
+  }
+
+  function moveColumn(delta) {
+    if (navRows.length === 0) return
+    if (cursor < 0) cursor = bestRow()
+    column += delta
+    clampColumn()
+  }
+
+  // Tab is the same walk with a wrap, so one key cycles a row without having
+  // to know how many buttons it has.
+  function cycleColumn(direction) {
+    if (navRows.length === 0) return
+    if (cursor < 0) { cursor = bestRow(); column = root.columnRow; return }
+    var last = lastColumnFor(sessionAt(cursor))
+    column += direction
+    if (column > last) column = root.columnRow
+    if (column < root.columnRow) column = last
+  }
+
+  function moveCursor(delta) {
+    if (navRows.length === 0) return
+    var next = cursor < 0 ? (delta > 0 ? 0 : navRows.length - 1) : cursor + delta
+    if (next < 0) next = 0
+    if (next > navRows.length - 1) next = navRows.length - 1
+    cursor = next
+    clampColumn()
+    var row = rowAt(next)
+    if (row) list.positionViewAtIndex(row.sessionIndex, ListView.Contain)
+  }
+
+  // Enter goes as deep as the cursor is: onto the agent when it is on one, and
+  // onto the session when the row is a session with nothing in it.
   function activateCursor() {
-    if (cursor < 0 || cursor >= sessions.length) return
-    openSession(sessions[cursor])
+    var session = sessionAt(cursor)
+    if (!session) return
+    if (column === root.columnOpen) { openSession(session); return }
+    if (column === root.columnDestroy) {
+      if (session.running) askKill(session)
+      else removeSession(session)
+      return
+    }
+    var agent = agentAt(cursor)
+    if (agent) focusAgent(session, agent)
+    else openSession(session)
+  }
+
+  // True when the cursor is on the row itself rather than out on a button,
+  // which is what the agent lines light up on.
+  function cursorInBody() {
+    return column === root.columnRow
+  }
+
+  // Which nav row a given agent is, so a delegate can tell whether the cursor
+  // is on it without knowing anything about the flattening above.
+  function cursorOnAgent(sessionIndex, agentIndex) {
+    var row = rowAt(cursor)
+    return row !== null && row.sessionIndex === sessionIndex
+      && row.agentIndex === agentIndex
+  }
+
+  // The mouse moves the same cursor the keys do, so leaving the mouse and
+  // reaching for the arrows carries on from where you were pointing.
+  function cursorToAgent(sessionIndex, agentIndex) {
+    column = root.columnRow
+    for (var i = 0; i < navRows.length; i++)
+      if (navRows[i].sessionIndex === sessionIndex && navRows[i].agentIndex === agentIndex) {
+        cursor = i
+        return
+      }
+  }
+
+  function cursorToSession(sessionIndex) {
+    column = root.columnRow
+    for (var i = 0; i < navRows.length; i++)
+      if (navRows[i].sessionIndex === sessionIndex) {
+        cursor = i
+        return
+      }
+  }
+
+  function cursorOnSession(sessionIndex) {
+    var row = rowAt(cursor)
+    return row !== null && row.sessionIndex === sessionIndex
   }
 
   // "default" is herdr's own name for the shared session, and it reads as a
@@ -251,8 +434,13 @@ Panel {
   // directories they were opened in survive the server. That is the difference
   // between a session worth starting back up and a name left over from an
   // afternoon, and it is not visible from the word "stopped".
+  // Only where the agent lines are not already saying it. A running session
+  // with agents in it now names its workspaces one per agent, next to the work
+  // going on there, so repeating the merged list above them is the same words
+  // twice with less meaning.
   function subtitleFor(session) {
     if (!session) return ""
+    if (session.running && (session.agentList || []).length > 0) return ""
     var projects = session.projects || []
     if (projects.length > 0) return projects.join("  ·  ")
     return session.running ? "no workspaces yet" : "nothing saved"
@@ -370,6 +558,46 @@ Panel {
     return parts.join(", ")
   }
 
+  function agentKey(sessionName, pane) {
+    return String(sessionName) + "\u0000" + String(pane)
+  }
+
+  // Everything that is asking for something right now, and which of those is
+  // new since the previous poll. A tie inside one poll goes to the highest
+  // state_change_seq, which is the best herdr can tell us; a tie there too
+  // goes to nobody, because a dot that blinks on the wrong agent is worse
+  // than one that does not blink at all.
+  function updateAttention(sessionList) {
+    var wantingNow = {}
+    var freshest = null
+    for (var i = 0; i < sessionList.length; i++) {
+      var session = sessionList[i]
+      var agents = session.agentList || []
+      for (var j = 0; j < agents.length; j++) {
+        if (!root.agentWants(agents[j].status)) continue
+        var key = root.agentKey(session.name, agents[j].pane)
+        wantingNow[key] = true
+        if (root.wantingBefore[key]) continue
+        if (freshest === null || (agents[j].seq || 0) > freshest.seq)
+          freshest = { key: key, seq: agents[j].seq || 0 }
+      }
+    }
+
+    // An agent that stopped asking stops blinking, even if nobody took its
+    // place: the blink is about a question still standing, not about history.
+    if (root.attentionKey !== "" && !wantingNow[root.attentionKey])
+      root.attentionKey = ""
+    if (freshest !== null && root.attentionPrimed) root.attentionKey = freshest.key
+
+    root.wantingBefore = wantingNow
+    root.attentionPrimed = true
+  }
+
+  function blinking(sessionName, agent) {
+    if (!agent || root.attentionKey === "") return false
+    return root.agentKey(sessionName, agent.pane) === root.attentionKey
+  }
+
   function applyPayload(text) {
     try {
       var data = JSON.parse(text)
@@ -377,12 +605,19 @@ Panel {
       errorText = data.error || ""
       if (!reachable) return
       sessions = data.sessions || []
+      updateAttention(sessions)
+      if (opened && !cursorPlaced) {
+        cursor = bestRow()
+        cursorPlaced = true
+        var row = rowAt(cursor)
+        if (row) list.positionViewAtIndex(row.sessionIndex, ListView.Contain)
+      }
       runningCount = data.running || 0
       agentCount = data.agents || 0
       blockedCount = data.blocked || 0
       doneCount = data.done || 0
       workingCount = data.working || 0
-      if (cursor > sessions.length - 1) cursor = sessions.length - 1
+      if (cursor > navRows.length - 1) cursor = navRows.length - 1
     } catch (e) {
       reachable = false
       errorText = "unexpected output from herdr-sessions"
@@ -390,8 +625,18 @@ Panel {
   }
 
   onOpenedChanged: {
-    if (opened) refresh()
-    else cursor = -1
+    if (opened) {
+      refresh()
+      // The list may still be the one from the last poll, so place the cursor
+      // on what we know now and again when the fresh answer lands.
+      cursor = bestRow()
+      column = root.columnRow
+      cursorPlaced = false
+    } else {
+      cursor = -1
+      column = root.columnRow
+      cursorPlaced = false
+    }
   }
 
   Process {
@@ -507,15 +752,21 @@ Panel {
       // than opening whatever the cursor was on.
       blocked: root.confirmOpen
       onCloseRequested: root.close()
-      onMoveRequested: function(dx, dy) { if (dy !== 0) root.moveCursor(dy) }
+      onMoveRequested: function(dx, dy) {
+        if (dy !== 0) root.moveCursor(dy)
+        else if (dx !== 0) root.moveColumn(dx)
+      }
+      onTabRequested: function(direction) { root.cycleColumn(direction) }
       // Only activateRequested, never returnRequested as well: Enter fires
       // both, and a handler on each runs the action twice.
       onActivateRequested: root.activateCursor()
       onTextKey: function(t) {
-        var onCursor = root.cursor >= 0 && root.cursor < root.sessions.length
-        if (t === "o" && onCursor) root.openSession(root.sessions[root.cursor])
-        else if (t === "k" && onCursor) root.askKill(root.sessions[root.cursor])
-        else if (t === "x" && onCursor) root.removeSession(root.sessions[root.cursor])
+        // The letter keys stay about the server, wherever inside it the
+        // cursor happens to be: you kill a server, never an agent.
+        var session = root.sessionAt(root.cursor)
+        if (t === "o" && session) root.openSession(session)
+        else if (t === "k" && session) root.askKill(session)
+        else if (t === "x" && session) root.removeSession(session)
         else if (t === "r") root.refresh()
       }
 
@@ -584,7 +835,10 @@ Panel {
             required property var modelData
             required property int index
 
-            readonly property bool active: root.cursor === row.index || rowMouse.containsMouse
+            // The session is lit whenever the cursor is anywhere inside it, so
+            // the action buttons on the right stay reachable while you walk
+            // the agents underneath.
+            readonly property bool active: root.cursorOnSession(row.index) || rowMouse.containsMouse
 
             width: list.width - (list.interactive ? Style.space(10) : 0)
             height: rowContent.implicitHeight + Style.space(10)
@@ -601,7 +855,7 @@ Panel {
               anchors.fill: parent
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
-              onContainsMouseChanged: if (containsMouse) root.cursor = row.index
+              onContainsMouseChanged: if (containsMouse) root.cursorToSession(row.index)
               onClicked: root.openSession(row.modelData)
             }
 
@@ -691,6 +945,8 @@ Panel {
 
                 Text {
                   width: parent.width
+                  visible: text !== ""
+                  height: visible ? implicitHeight : 0
                   text: root.subtitleFor(row.modelData)
                   textFormat: Text.PlainText
                   elide: Text.ElideRight
@@ -717,6 +973,7 @@ Panel {
                   Item {
                     id: agentRow
                     required property var modelData
+                    required property int index
                     width: agentColumn.width
                     height: agentTitle.implicitHeight + Style.space(4)
 
@@ -729,6 +986,7 @@ Panel {
                       anchors.rightMargin: -Style.space(4)
                       radius: Style.cornerRadius
                       color: agentMouse.containsMouse
+                          || (root.cursorInBody() && root.cursorOnAgent(row.index, agentRow.index))
                         ? Qt.rgba(root.foreground.r, root.foreground.g,
                                   root.foreground.b, 0.13)
                         : "transparent"
@@ -736,6 +994,15 @@ Panel {
                       Behavior on color { ColorAnimation { duration: 80 } }
                     }
 
+                    // The dot of the agent that spoke last pulses. Opacity
+                    // only, never size or colour: a dot that grows drags the
+                    // line it sits on, and the colour is already carrying the
+                    // state. It fades rather than flicks, because a hard
+                    // on-off in the corner of your eye reads as a fault.
+                    //
+                    // The animation is bound to `running`, so it stops the
+                    // moment that agent is answered instead of being left
+                    // spinning behind a dot nobody is looking at.
                     Text {
                       id: agentDot
                       anchors.left: parent.left
@@ -745,14 +1012,47 @@ Panel {
                       font.family: root.fontFamily
                       font.pixelSize: Style.space(5)
                       color: root.agentColor(agentRow.modelData.status)
+
+                      SequentialAnimation on opacity {
+                        running: root.blinking(row.modelData.name, agentRow.modelData)
+                        loops: Animation.Infinite
+                        alwaysRunToEnd: true
+                        NumberAnimation { to: 0.25; duration: 600; easing.type: Easing.InOutQuad }
+                        NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
+                        onStopped: agentDot.opacity = 1
+                      }
                     }
 
                     // An agent that wants something is written at full
                     // strength; the rest stay dimmed, so the line worth
                     // reading is the one that stands out of the column.
+                    // Which workspace inside the server this agent sits in.
+                    // Herdr names them and the name is how you think about the
+                    // work, but until now it only appeared merged into the
+                    // session subtitle, where it said nothing about which
+                    // agent was where.
+                    //
+                    // Dimmed and capped at a share of the row, because it is
+                    // the address and the title is the thing: a long workspace
+                    // name must never be what pushes the title out.
+                    Text {
+                      id: agentWorkspace
+                      anchors.left: agentDot.right
+                      anchors.leftMargin: Style.space(5)
+                      anchors.verticalCenter: parent.verticalCenter
+                      visible: text !== ""
+                      width: Math.min(implicitWidth, agentRow.width * 0.38)
+                      text: agentRow.modelData.workspace || ""
+                      textFormat: Text.PlainText
+                      elide: Text.ElideRight
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      color: Qt.darker(root.foreground, 2.0)
+                    }
+
                     Text {
                       id: agentTitle
-                      anchors.left: agentDot.right
+                      anchors.left: agentWorkspace.visible ? agentWorkspace.right : agentDot.right
                       anchors.leftMargin: Style.space(5)
                       anchors.right: agentNote.visible ? agentNote.left : parent.right
                       anchors.rightMargin: agentNote.visible ? Style.space(6) : 0
@@ -764,6 +1064,7 @@ Panel {
                       font.pixelSize: Style.font.caption
                       color: root.agentWants(agentRow.modelData.status)
                           || agentMouse.containsMouse
+                          || (root.cursorInBody() && root.cursorOnAgent(row.index, agentRow.index))
                         ? root.foreground
                         : Qt.darker(root.foreground, 1.35)
                     }
@@ -794,7 +1095,7 @@ Panel {
                       anchors.fill: parent
                       hoverEnabled: true
                       cursorShape: Qt.PointingHandCursor
-                      onContainsMouseChanged: if (containsMouse) root.cursor = row.index
+                      onContainsMouseChanged: if (containsMouse) root.cursorToAgent(row.index, agentRow.index)
                       onClicked: root.focusAgent(row.modelData, agentRow.modelData)
                     }
                   }
@@ -811,10 +1112,17 @@ Panel {
                 anchors.top: parent.top
                 spacing: Style.space(2)
                 opacity: row.active ? 1 : 0.25
+                // The buttons stay faint until the row is under the cursor,
+                // and `active` already covers that for both mouse and keys.
 
                 Behavior on opacity { NumberAnimation { duration: 80 } }
 
+                // hasCursor makes the button render its hover state for the
+                // keyboard too, so the cursor looks the same whether it got
+                // there by pointing or by pressing Right.
                 PanelActionButton {
+                  hasCursor: root.cursorOnSession(row.index)
+                    && root.column === root.columnOpen
                   iconText: root.iconOpen
                   tooltipText: row.modelData.windowAddress !== ""
                     ? "Focus this session" : "Open this session"
@@ -839,6 +1147,8 @@ Panel {
 
                   PanelActionButton {
                     id: killButton
+                    hasCursor: root.cursorOnSession(row.index)
+                      && root.column === root.columnDestroy
                     visible: row.modelData.running
                     iconText: root.iconKill
                     tooltipText: "Kill this server"
@@ -850,6 +1160,8 @@ Panel {
                   }
 
                   PanelActionButton {
+                    hasCursor: root.cursorOnSession(row.index)
+                      && root.column === root.columnDestroy
                     visible: !row.modelData.running && !row.modelData.isDefault
                     iconText: root.iconTrash
                     tooltipText: "Delete this session"

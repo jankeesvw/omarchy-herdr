@@ -108,9 +108,9 @@ cmd_demo() {
 demo_list() {
   cat <<'DEMO'
 {"ok":true,"error":"","sessions":[
-{"name":"default","isDefault":true,"running":true,"version":"0.8.2","agents":2,"working":1,"blocked":0,"idle":1,"done":0,"workspaces":2,"projects":["checkout-service","design-tokens"],"agentList":[{"title":"Rewrite the receipt formatter","status":"working","pane":"w1:p1"},{"title":"Token names for the new palette","status":"idle","pane":"w2:p1"}],"windowAddress":"0x1"},
-{"name":"3","isDefault":false,"running":true,"version":"0.8.2","agents":1,"working":0,"blocked":1,"idle":0,"done":0,"workspaces":1,"projects":["billing-api"],"agentList":[{"title":"Drop the legacy invoice table","status":"blocked","pane":"w1:p1"}],"windowAddress":"0x2"},
-{"name":"5","isDefault":false,"running":true,"version":"0.8.2","agents":2,"working":0,"blocked":0,"idle":0,"done":2,"workspaces":1,"projects":["docs-site"],"agentList":[{"title":"Upgrade the search index","status":"done","pane":"w1:p1"},{"title":"Fix the broken anchor links","status":"done","pane":"w1:p2"}],"windowAddress":""},
+{"name":"default","isDefault":true,"running":true,"version":"0.8.2","agents":2,"working":1,"blocked":0,"idle":1,"done":0,"workspaces":2,"projects":["checkout-service","design-tokens"],"agentList":[{"title":"Rewrite the receipt formatter","status":"working","pane":"w1:p1","seq":11},{"title":"Token names for the new palette","status":"idle","pane":"w2:p1","seq":9}],"windowAddress":"0x1"},
+{"name":"3","isDefault":false,"running":true,"version":"0.8.2","agents":1,"working":0,"blocked":1,"idle":0,"done":0,"workspaces":1,"projects":["billing-api"],"agentList":[{"title":"Drop the legacy invoice table","status":"blocked","pane":"w1:p1","seq":14}],"windowAddress":"0x2"},
+{"name":"5","isDefault":false,"running":true,"version":"0.8.2","agents":2,"working":0,"blocked":0,"idle":0,"done":2,"workspaces":1,"projects":["docs-site"],"agentList":[{"title":"Upgrade the search index","status":"done","pane":"w1:p1","seq":12},{"title":"Fix the broken anchor links","status":"done","pane":"w1:p2","seq":13}],"windowAddress":""},
 {"name":"9","isDefault":false,"running":false,"version":"","agents":0,"working":0,"blocked":0,"idle":0,"done":0,"workspaces":0,"projects":[],"agentList":[],"windowAddress":""}
 ],"running":3,"agents":5,"blocked":1,"done":2,"working":1}
 DEMO
@@ -318,6 +318,12 @@ cmd_list() {
        | .name as $name
        | (($snapshots[$name].result.snapshot) // {}) as $snap
        | ($snap.agents // []) as $agents
+       # Workspace labels live on the workspace, the agent only carries the id
+       # it sits in, so they are joined here rather than in the panel: one
+       # place turns what herdr says into what gets drawn.
+       | (($snap.workspaces // [])
+          | map({key: (.workspace_id // ""), value: (.label // "")})
+          | from_entries) as $wslabels
        | {
            name: $name,
            isDefault: (.default // false),
@@ -332,7 +338,13 @@ cmd_list() {
            agentList: ($agents
                        | map({title: (.terminal_title_stripped // .terminal_title // ""),
                               status: (.agent_status // "unknown"),
-                              pane: (.pane_id // "")})
+                              pane: (.pane_id // ""),
+                              workspace: ($wslabels[.workspace_id // ""] // ""),
+                              # Herdr bumps this every time an agent changes
+                              # state. Passed through so the panel can tell
+                              # two agents that both want something apart by
+                              # which one spoke last.
+                              seq: (.state_change_seq // 0)})
                        | map(select(.title != ""))
                        # The attention queue herdr uses itself, the order its
                        # own agent panel takes when agent_panel_sort is set to
