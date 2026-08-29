@@ -43,6 +43,34 @@ die() {
 
 # JSON-encode with jq, so a session name or window title with a quote, a
 # backslash or a newline in it cannot break the object the panel parses.
+# What another process is allowed to hand this script before anything reads
+# it. Everything below arrives from herdr's own servers, from hyprctl, or from
+# a session.json on disk, and none of those has a size this script controls.
+# A server that is wedged, a session file somebody grew by accident, or simply
+# more sessions than anyone meant to keep: the widget polls this every few
+# seconds from a shell that never restarts, so "the other side decides how much
+# memory this costs" is the wrong default even when the number never bites.
+SESSIONS_BYTE_CAP=$((2 * 1024 * 1024))
+SNAPSHOT_BYTE_CAP=$((2 * 1024 * 1024))
+WINDOWS_BYTE_CAP=$((4 * 1024 * 1024))
+SESSION_FILE_CAP=$((1 * 1024 * 1024))
+# The assembled object, which is the one bound that covers a hundred sessions
+# each just under their own ceiling.
+TOTAL_BYTE_CAP=$((8 * 1024 * 1024))
+SESSION_COUNT_CAP=200
+AGENT_COUNT_CAP=500
+
+# Whether a read came back at its ceiling, which means there was more to come.
+# Callers pipe through `head -c cap+1`, so that one extra byte is the evidence.
+#
+# Measured rather than read off an exit status on purpose: under `set -o
+# pipefail` a `head` that closes the pipe early hands the producer a SIGPIPE
+# and makes the whole pipeline non-zero on a perfectly good read, and under
+# `set -e` that would take the script down with it.
+over_byte_cap() {
+  [ "$(printf '%s' "$1" | wc -c)" -gt "$2" ]
+}
+
 json_string() {
   printf '%s' "${1-}" | jq -Rs .
 }
@@ -155,8 +183,11 @@ window_map() {
   command -v hyprctl >/dev/null 2>&1 || return 0
 
   local clients
-  clients=$(hyprctl clients -j 2>/dev/null) || return 0
+  clients=$(hyprctl clients -j 2>/dev/null | head -c "$((WINDOWS_BYTE_CAP + 1))") || true
   [[ -n $clients ]] || return 0
+  # Window titles are set by whatever is running in them. Without a ceiling a
+  # single window could decide how much this costs.
+  over_byte_cap "$clients" "$WINDOWS_BYTE_CAP" && return 0
 
   declare -A window_of_pid=()
   local pid address workspace
@@ -244,19 +275,26 @@ window_map() {
 snapshot_for() {
   local name="$1" is_default="$2"
   local out
+  # `|| true` because the cap in front of this can close the pipe on the
+  # server, and a SIGPIPE there is a bounded read rather than a failure.
   if [[ $is_default == true ]]; then
-    out=$(herdr api snapshot 2>/dev/null) || return 1
+    out=$(herdr api snapshot 2>/dev/null | head -c "$((SNAPSHOT_BYTE_CAP + 1))") || true
   else
-    out=$(herdr --session "$name" api snapshot 2>/dev/null) || return 1
+    out=$(herdr --session "$name" api snapshot 2>/dev/null | head -c "$((SNAPSHOT_BYTE_CAP + 1))") || true
   fi
   [[ -n $out ]] || return 1
+  # One oversized server is skipped rather than allowed to take the list down:
+  # the row falls back to what session.json remembers, the same as a session
+  # whose server never answered.
+  over_byte_cap "$out" "$SNAPSHOT_BYTE_CAP" && return 1
   printf '%s' "$out"
 }
 
 cmd_list() {
   local sessions_json
-  sessions_json=$(herdr session list --json 2>/dev/null) || die "could not reach herdr"
+  sessions_json=$(herdr session list --json 2>/dev/null | head -c "$((SESSIONS_BYTE_CAP + 1))") || true
   [[ -n $sessions_json ]] || die "could not reach herdr"
+  over_byte_cap "$sessions_json" "$SESSIONS_BYTE_CAP" && die "session list too large to read safely"
 
   local windows
   windows=$(window_map || true)
@@ -277,9 +315,23 @@ cmd_list() {
   # than only that it is down - the difference between a session worth starting
   # back up and a name left over from an afternoon.
   local snapshots='' saved='' name is_default running dir snap labels
+  # Two ceilings on the loop itself. The per-source caps above bound any one
+  # answer; these bound the sum of them, which is the case a hundred sessions
+  # each just under their own limit would otherwise walk straight through.
+  local seen=0 dropped=0
   while IFS=$'\t' read -r name is_default running dir; do
     [[ -n $name ]] || continue
     valid_session_name "$name" || continue
+
+    if (( seen >= SESSION_COUNT_CAP )); then
+      dropped=$(( dropped + 1 ))
+      continue
+    fi
+    if (( ${#snapshots} + ${#saved} > TOTAL_BYTE_CAP )); then
+      dropped=$(( dropped + 1 ))
+      continue
+    fi
+    seen=$(( seen + 1 ))
 
     if [[ $running == true ]]; then
       snap=$(snapshot_for "$name" "$is_default") || continue
@@ -291,6 +343,10 @@ cmd_list() {
     # The label herdr shows is the name a workspace was given, and the last
     # part of the directory it was opened in otherwise - the same two, in the
     # same order, that a running snapshot resolves to its label.
+    # Read through a ceiling rather than handed to jq whole: this file is on
+    # disk and nothing here decided how big it is.
+    over_byte_cap "$(head -c "$((SESSION_FILE_CAP + 1))" -- "$dir/session.json" 2>/dev/null || true)" \
+      "$SESSION_FILE_CAP" && continue
     labels=$(jq -c --arg home "$HOME" '[.workspaces[]?
                      | (.custom_name
                         // (if (.identity_cwd // "") == $home then "~"
@@ -311,6 +367,7 @@ cmd_list() {
   printf '%s' "$sessions_json" | jq -c \
     --argjson snapshots "$snapshots" \
     --argjson saved "$saved" \
+    --argjson agentCap "$AGENT_COUNT_CAP" \
     --arg windows "$windows" '
     ($windows | split("\n") | map(select(length > 0) | split("\t"))
       | map({key: .[0], value: .[1]}) | from_entries) as $win
@@ -356,7 +413,11 @@ cmd_list() {
                                  elif .status == "done"    then 1
                                  elif .status == "working" then 2
                                  elif .status == "idle"    then 3
-                                 else 4 end)),
+                                 else 4 end)
+                                 # After the sort, so the cap keeps what wants an answer rather
+                                 # than whatever the server happened to list first. The counts
+                                 # above stay honest: they are taken from the full set.
+                                 | .[0:$agentCap]),
            projects: (if (.running // false)
                       then (($snap.workspaces // []) | map(.label // "")
                             | map(select(length > 0)) | unique)
