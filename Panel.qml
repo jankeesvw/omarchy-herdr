@@ -79,6 +79,8 @@ Panel {
   property var killTarget: null
   property bool confirmOpen: false
 
+  readonly property bool compact: setting("compact", false)
+
   // Which agent spoke last, as "<session>\u0000<pane>", and every agent that
   // was already asking when we last looked.
   //
@@ -121,10 +123,13 @@ Panel {
   // Width of the badge and of the whole icon+badge row. Computed here rather
   // than read off the Row, because iconComponent is a Component with its own
   // scope: ids inside it are not visible out here.
-  readonly property int badgeWidth: badgeCount > 0
+  readonly property bool badgeVisible: compact || (reachable && badgeCount > 0)
+  readonly property int badgeWidth: badgeVisible
     ? Math.max(Style.space(12), String(badgeCount).length * Style.space(6) + Style.space(8))
     : 0
-  readonly property int barContentWidth: Style.bar.iconFont + badgeWidth + Style.space(5)
+  readonly property int barContentWidth: compact
+    ? badgeWidth
+    : Style.bar.iconFont + badgeWidth + Style.space(5)
 
   // Panel is a bare Item with no size of its own, so the bar would hand this
   // widget zero width. Set it from the computed content width, never from a
@@ -695,6 +700,7 @@ Panel {
 
           Text {
             anchors.verticalCenter: parent.verticalCenter
+            visible: !root.compact
             text: root.iconServer
             textFormat: Text.PlainText
             font.family: root.fontFamily
@@ -708,7 +714,7 @@ Panel {
           // you says so without the panel being open.
           Rectangle {
             anchors.verticalCenter: parent.verticalCenter
-            visible: root.reachable && root.badgeCount > 0
+            visible: root.badgeVisible
             height: Style.space(12)
             width: root.badgeWidth
             radius: height / 2

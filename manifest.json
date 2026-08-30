@@ -18,6 +18,18 @@
     "description": "Running herdr servers in the bar, with every agent inside them, and a click that lands you on the one you picked",
     "category": "Apps",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": {
+      "compact": false
+    },
+    "schema": [
+      {
+        "key": "compact",
+        "type": "boolean",
+        "label": "Compact bar widget",
+        "defaultValue": false,
+        "description": "Hide the server icon and show only the count badge."
+      }
+    ]
   }
 }
