@@ -12,8 +12,11 @@ list one click away.
 
 ## What it shows
 
-The bar carries the number of running servers. The badge turns red when an
-agent somewhere is blocked and waiting on an answer.
+The bar carries the number of running servers, on a badge sitting in the top
+right corner of the icon. It turns red when an agent is blocked and waiting on
+an answer, green when work finished while you were looking elsewhere, and amber
+while something is still running. When every agent is idle there is nothing to
+say, so the badge goes away and the icon stands on its own.
 
 Each row in the panel is one session:
 

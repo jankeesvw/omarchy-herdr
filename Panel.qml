@@ -63,6 +63,10 @@ Panel {
   // like a working one - which is the distinction this widget exists to draw.
   // So this one colour is picked rather than themed.
   readonly property color finished: "#5FA46B"
+  // Working is amber for the same reason, and because it used to borrow the
+  // accent: on a theme whose accent is red or green, "busy" was indistinguish-
+  // able from "needs you" or "finished" - the two the badge exists to separate.
+  readonly property color working: "#D6A84B"
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   property var sessions: []
@@ -71,6 +75,9 @@ Panel {
   property int blockedCount: 0
   property int doneCount: 0
   property int workingCount: 0
+  // The three states worth a badge. Anything else is the herd at rest.
+  readonly property bool badgeActive:
+    blockedCount > 0 || doneCount > 0 || workingCount > 0
   property bool reachable: true
   property string errorText: ""
   // Session the script is currently acting on, so its row can dim.
@@ -116,15 +123,7 @@ Panel {
   property int column: 0
   property int cursor: -1
 
-  readonly property int badgeCount: runningCount
-
-  // Width of the badge and of the whole icon+badge row. Computed here rather
-  // than read off the Row, because iconComponent is a Component with its own
-  // scope: ids inside it are not visible out here.
-  readonly property int badgeWidth: badgeCount > 0
-    ? Math.max(Style.space(12), String(badgeCount).length * Style.space(6) + Style.space(8))
-    : 0
-  readonly property int barContentWidth: Style.bar.iconFont + badgeWidth + Style.space(5)
+  readonly property int barContentWidth: Style.bar.iconFont
 
   // Panel is a bare Item with no size of its own, so the bar would hand this
   // widget zero width. Set it from the computed content width, never from a
@@ -538,7 +537,7 @@ Panel {
   function badgeColor() {
     if (blockedCount > 0) return root.urgent
     if (doneCount > 0) return root.finished
-    return root.accent
+    return root.working
   }
 
   function titleText() {
@@ -681,48 +680,58 @@ Panel {
     bar: root.bar
     opacity: root.reachable ? 1 : 0.5
     slotSize: root.barSlot
-    // The icon component is loaded into a square canvas of opticalSize, meant
-    // for one glyph. Widen it too, or the icon falls outside it and only the
-    // badge survives.
     opticalSize: root.barContentWidth
     tooltipText: root.plain(root.tooltipText())
 
     iconComponent: Component {
       Item {
-        Row {
+        Text {
+          id: serverIcon
           anchors.centerIn: parent
-          spacing: Style.space(5)
+          text: root.iconServer
+          textFormat: Text.PlainText
+          font.family: root.fontFamily
+          font.pixelSize: Style.bar.iconFont
+          renderType: Text.NativeRendering
+          color: root.opened ? root.accent : root.foreground
+        }
+
+        // The server count rides the glyph's top-right corner, the way an
+        // unread count rides an app icon: a bit over three quarters of the
+        // glyph's size and overlapping its corner, because a badge as big as
+        // the icon and sitting clear of it just reads as a second icon in the
+        // bar. Sized off the icon font so it follows a theme that resizes it.
+        Rectangle {
+          id: badge
+          anchors.horizontalCenter: serverIcon.horizontalCenter
+          anchors.horizontalCenterOffset: Math.round(Style.bar.iconFont * 0.44)
+          anchors.verticalCenter: serverIcon.verticalCenter
+          anchors.verticalCenterOffset: -Math.round(Style.bar.iconFont * 0.42)
+          visible: root.reachable && root.runningCount > 0 && root.badgeActive
+          height: Math.round(Style.bar.iconFont * 0.78)
+          width: Math.max(height, count.implicitWidth + Math.round(height * 0.45))
+          radius: height / 2
+          color: root.badgeColor()
+          // A rim in the bar's own background separates the badge from the
+          // glyph it sits on, so the corner it covers still reads as a corner
+          // and not as two shapes fused together.
+          border.width: Math.round(Style.bar.iconFont * 0.06)
+          border.color: Color.bar.background
 
           Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.iconServer
+            id: count
+            anchors.centerIn: parent
+            // Centring the text item leaves the digit riding high: a line box
+            // reserves descender room a digit never uses. Nudge it back down
+            // onto the middle of the disc.
+            anchors.verticalCenterOffset: Math.round(font.pixelSize * 0.1)
+            text: root.runningCount
             textFormat: Text.PlainText
             font.family: root.fontFamily
-            font.pixelSize: Style.bar.iconFont
+            font.pixelSize: Math.round((badge.height - 2 * badge.border.width) * 0.8)
+            font.bold: true
             renderType: Text.NativeRendering
-            color: root.opened ? root.accent : root.foreground
-          }
-
-          // The badge carries the alarm as well as the number: red when an
-          // agent somewhere is blocked on a question, so a herd that needs
-          // you says so without the panel being open.
-          Rectangle {
-            anchors.verticalCenter: parent.verticalCenter
-            visible: root.reachable && root.badgeCount > 0
-            height: Style.space(12)
-            width: root.badgeWidth
-            radius: height / 2
-            color: root.badgeColor()
-
-            Text {
-              anchors.centerIn: parent
-              text: root.badgeCount
-              textFormat: Text.PlainText
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              renderType: Text.NativeRendering
-              color: Color.background
-            }
+            color: Color.background
           }
         }
       }
