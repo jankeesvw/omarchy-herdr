@@ -975,7 +975,19 @@ Panel {
                     required property var modelData
                     required property int index
                     width: agentColumn.width
-                    height: agentTitle.implicitHeight + Style.space(4)
+                    height: (agentWorkspace.visible
+                             ? agentWorkspace.implicitHeight + agentTitle.implicitHeight + Style.space(1)
+                             : agentTitle.implicitHeight) + Style.space(5)
+
+                    // Three greys down the row, and that is the whole trick:
+                    // the workspace is the name of the place and sits at the
+                    // top, the terminal title is what happens to be running
+                    // there and sits under it a shade back, and the state sits
+                    // out right in its own colour. Give any two of them the
+                    // same weight and the panel turns into a wall of text.
+                    readonly property bool lit: agentMouse.containsMouse
+                      || (root.cursorInBody() && root.cursorOnAgent(row.index, agentRow.index))
+                    readonly property bool wants: root.agentWants(modelData.status)
 
                     // Bleeds past the text on both sides so the highlight
                     // reads as a row of the list rather than a box drawn
@@ -985,8 +997,7 @@ Panel {
                       anchors.leftMargin: -Style.space(4)
                       anchors.rightMargin: -Style.space(4)
                       radius: Style.cornerRadius
-                      color: agentMouse.containsMouse
-                          || (root.cursorInBody() && root.cursorOnAgent(row.index, agentRow.index))
+                      color: agentRow.lit
                         ? Qt.rgba(root.foreground.r, root.foreground.g,
                                   root.foreground.b, 0.13)
                         : "transparent"
@@ -1006,7 +1017,11 @@ Panel {
                     Text {
                       id: agentDot
                       anchors.left: parent.left
-                      anchors.verticalCenter: parent.verticalCenter
+                      // Sits on the first line rather than between the two, so
+                      // a two-line agent still reads as one entry starting at
+                      // the top instead of a bracket around a paragraph.
+                      anchors.top: parent.top
+                      anchors.topMargin: Style.space(3)
                       text: root.iconDot
                       textFormat: Text.PlainText
                       font.family: root.fontFamily
@@ -1039,40 +1054,48 @@ Panel {
                       id: agentWorkspace
                       anchors.left: agentDot.right
                       anchors.leftMargin: Style.space(5)
-                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.right: agentNote.visible ? agentNote.left : parent.right
+                      anchors.rightMargin: agentNote.visible ? Style.space(6) : 0
+                      anchors.top: parent.top
                       visible: text !== ""
-                      width: Math.min(implicitWidth, agentRow.width * 0.38)
                       text: agentRow.modelData.workspace || ""
                       textFormat: Text.PlainText
                       elide: Text.ElideRight
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
-                      color: Qt.darker(root.foreground, 2.0)
+                      color: agentRow.wants || agentRow.lit
+                        ? root.foreground
+                        : Qt.darker(root.foreground, 1.3)
                     }
 
                     Text {
                       id: agentTitle
-                      anchors.left: agentWorkspace.visible ? agentWorkspace.right : agentDot.right
+                      anchors.left: agentDot.right
                       anchors.leftMargin: Style.space(5)
-                      anchors.right: agentNote.visible ? agentNote.left : parent.right
-                      anchors.rightMargin: agentNote.visible ? Style.space(6) : 0
-                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.right: agentWorkspace.visible
+                        ? parent.right
+                        : (agentNote.visible ? agentNote.left : parent.right)
+                      anchors.rightMargin: agentWorkspace.visible
+                        ? 0 : (agentNote.visible ? Style.space(6) : 0)
+                      anchors.top: agentWorkspace.visible ? agentWorkspace.bottom : parent.top
+                      anchors.topMargin: agentWorkspace.visible ? Style.space(1) : 0
                       text: root.cleanTitle(agentRow.modelData.title)
                       textFormat: Text.PlainText
                       elide: Text.ElideRight
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
-                      color: root.agentWants(agentRow.modelData.status)
-                          || agentMouse.containsMouse
-                          || (root.cursorInBody() && root.cursorOnAgent(row.index, agentRow.index))
-                        ? root.foreground
-                        : Qt.darker(root.foreground, 1.35)
+                      // Always a step behind the workspace above it, lit or
+                      // not: what the agent called itself is the detail, the
+                      // place is the heading.
+                      color: agentRow.wants || agentRow.lit
+                        ? Qt.darker(root.foreground, 1.5)
+                        : Qt.darker(root.foreground, 2.1)
                     }
 
                     Text {
                       id: agentNote
                       anchors.right: parent.right
-                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.top: parent.top
                       visible: root.agentNote(agentRow.modelData.status) !== ""
                       text: root.agentNote(agentRow.modelData.status)
                       textFormat: Text.PlainText
