@@ -75,7 +75,9 @@ Panel {
   property int blockedCount: 0
   property int doneCount: 0
   property int workingCount: 0
-  // The three states worth a badge. Anything else is the herd at rest.
+  // The three states that turn into each other without you touching anything.
+  // They decide the badge's colour, and they decide how often it is worth
+  // asking - an idle herd cannot change until you change it.
   readonly property bool badgeActive:
     blockedCount > 0 || doneCount > 0 || workingCount > 0
   property bool reachable: true
@@ -665,9 +667,11 @@ Panel {
   // Polled rather than subscribed: herdr has an event socket, but one per
   // server, and the count in the bar is the sort of thing that can be a few
   // seconds old. Faster while the panel is open, because the agent states in
-  // it are what you came to read.
+  // it are what you came to read, and faster while anything is live, because
+  // that is the only time the badge colour can go stale on its own. Idle costs
+  // one poll every twenty seconds and catches the moment you start something.
   Timer {
-    interval: root.opened ? 3000 : 20000
+    interval: root.opened ? 3000 : (root.badgeActive ? 5000 : 20000)
     running: true
     repeat: true
     triggeredOnStart: true
