@@ -125,7 +125,9 @@ Panel {
   property int column: 0
   property int cursor: -1
 
-  readonly property int barContentWidth: Style.bar.iconFont
+  // The glyph, plus the few pixels the badge overhangs its corner by. Without
+  // them the disc spills onto whatever widget sits next in the bar.
+  readonly property int barContentWidth: Style.bar.iconFont + Style.space(4)
 
   // Panel is a bare Item with no size of its own, so the bar would hand this
   // widget zero width. Set it from the computed content width, never from a
@@ -701,18 +703,20 @@ Panel {
         }
 
         // The server count rides the glyph's top-right corner, the way an
-        // unread count rides an app icon: a bit over three quarters of the
-        // glyph's size and overlapping its corner, because a badge as big as
-        // the icon and sitting clear of it just reads as a second icon in the
-        // bar. Sized off the icon font so it follows a theme that resizes it.
+        // unread count rides an app icon, and is sized off the icon font so a
+        // theme that resizes the bar takes it along. The ratios are what the
+        // default 13px icon can carry: a 12px disc around a 9px digit. Three
+        // quarters of the glyph leaves the digit on 6px, which is a coloured
+        // speck rather than a count - unreadable at two digits - and the badge
+        // exists to say how many as much as it says which colour.
         Rectangle {
           id: badge
           anchors.horizontalCenter: serverIcon.horizontalCenter
-          anchors.horizontalCenterOffset: Math.round(Style.bar.iconFont * 0.44)
+          anchors.horizontalCenterOffset: Math.round(Style.bar.iconFont * 0.42)
           anchors.verticalCenter: serverIcon.verticalCenter
-          anchors.verticalCenterOffset: -Math.round(Style.bar.iconFont * 0.42)
+          anchors.verticalCenterOffset: -Math.round(Style.bar.iconFont * 0.40)
           visible: root.reachable && root.runningCount > 0 && root.badgeActive
-          height: Math.round(Style.bar.iconFont * 0.78)
+          height: Math.round(Style.bar.iconFont * 0.95)
           width: Math.max(height, count.implicitWidth + Math.round(height * 0.45))
           radius: height / 2
           color: root.badgeColor()
@@ -732,7 +736,7 @@ Panel {
             text: root.runningCount
             textFormat: Text.PlainText
             font.family: root.fontFamily
-            font.pixelSize: Math.round((badge.height - 2 * badge.border.width) * 0.8)
+            font.pixelSize: Math.round((badge.height - 2 * badge.border.width) * 0.88)
             font.bold: true
             renderType: Text.NativeRendering
             color: Color.background
