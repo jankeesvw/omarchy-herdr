@@ -704,7 +704,12 @@ Panel {
           // icon turns dark over a light wallpaper the way every other bar
           // icon does. The theme foreground is only right where the panel
           // paints its own background.
-          color: root.opened ? root.accent : root.barForeground
+          //
+          // Nothing here reacts to the panel being open: the bar draws that
+          // itself, as an accent line on the module's inner edge, for every
+          // widget that has a panel. Tinting the glyph as well says the same
+          // thing twice, in the one colour that means something else.
+          color: root.barForeground
         }
 
         // The server count rides the glyph's top-right corner, the way an
