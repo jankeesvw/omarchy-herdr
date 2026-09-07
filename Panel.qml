@@ -699,7 +699,12 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.bar.iconFont
           renderType: Text.NativeRendering
-          color: root.opened ? root.accent : root.foreground
+          // barForeground, not the theme's foreground: on a transparent bar
+          // the shell picks the glyph colour off what is behind it, so the
+          // icon turns dark over a light wallpaper the way every other bar
+          // icon does. The theme foreground is only right where the panel
+          // paints its own background.
+          color: root.opened ? root.accent : root.barForeground
         }
 
         // The server count rides the glyph's top-right corner, the way an
