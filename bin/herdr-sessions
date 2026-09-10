@@ -59,6 +59,7 @@ SESSION_FILE_CAP=$((1 * 1024 * 1024))
 TOTAL_BYTE_CAP=$((8 * 1024 * 1024))
 SESSION_COUNT_CAP=200
 AGENT_COUNT_CAP=500
+MACHINE_COUNT_CAP=16
 
 # Whether a read came back at its ceiling, which means there was more to come.
 # Callers pipe through `head -c cap+1`, so that one extra byte is the evidence.
@@ -81,6 +82,20 @@ json_string() {
 # think it is: refuse it rather than tidy it up.
 valid_session_name() {
   [[ "${1-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+}
+
+valid_machine_id() {
+  [[ "${1-}" =~ ^[a-f0-9]{32}$ ]]
+}
+
+valid_session_key() {
+  [[ "${1-}" =~ ^local:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] ||
+    [[ "${1-}" =~ ^remote:[a-f0-9]{32}$ ]]
+}
+
+valid_ssh_target() {
+  local target="${1-}"
+  [[ -n $target && ${#target} -le 255 && $target != -* && $target != *[$' \t\r\n']* ]]
 }
 
 # Pane ids are herdr's own - "w1:p2" - and come back from the panel the same
@@ -136,10 +151,10 @@ cmd_demo() {
 demo_list() {
   cat <<'DEMO'
 {"ok":true,"error":"","sessions":[
-{"name":"default","isDefault":true,"running":true,"version":"0.8.2","agents":2,"working":1,"blocked":0,"idle":1,"done":0,"workspaces":2,"projects":["checkout-service","design-tokens"],"agentList":[{"title":"Rewrite the receipt formatter","status":"working","pane":"w1:p1","seq":11},{"title":"Token names for the new palette","status":"idle","pane":"w2:p1","seq":9}],"windowAddress":"0x1"},
-{"name":"3","isDefault":false,"running":true,"version":"0.8.2","agents":1,"working":0,"blocked":1,"idle":0,"done":0,"workspaces":1,"projects":["billing-api"],"agentList":[{"title":"Drop the legacy invoice table","status":"blocked","pane":"w1:p1","seq":14}],"windowAddress":"0x2"},
-{"name":"5","isDefault":false,"running":true,"version":"0.8.2","agents":2,"working":0,"blocked":0,"idle":0,"done":2,"workspaces":1,"projects":["docs-site"],"agentList":[{"title":"Upgrade the search index","status":"done","pane":"w1:p1","seq":12},{"title":"Fix the broken anchor links","status":"done","pane":"w1:p2","seq":13}],"windowAddress":""},
-{"name":"9","isDefault":false,"running":false,"version":"","agents":0,"working":0,"blocked":0,"idle":0,"done":0,"workspaces":0,"projects":[],"agentList":[],"windowAddress":""}
+{"key":"local:default","name":"default","machine":"Local","remote":false,"isDefault":true,"running":true,"version":"0.9.0","agents":2,"working":1,"blocked":0,"idle":1,"done":0,"workspaces":2,"projects":["checkout-service","design-tokens"],"agentList":[{"title":"Rewrite the receipt formatter","status":"working","pane":"w1:p1","seq":11},{"title":"Token names for the new palette","status":"idle","pane":"w2:p1","seq":9}],"windowAddress":"0x1"},
+{"key":"remote:0123456789abcdef0123456789abcdef","name":"default","machine":"Build PC","remote":true,"isDefault":true,"running":true,"version":"0.9.0","agents":1,"working":0,"blocked":1,"idle":0,"done":0,"workspaces":1,"projects":["billing-api"],"agentList":[{"title":"Drop the legacy invoice table","status":"blocked","pane":"w1:p1","seq":14}],"windowAddress":""},
+{"key":"local:5","name":"5","machine":"Local","remote":false,"isDefault":false,"running":true,"version":"0.9.0","agents":2,"working":0,"blocked":0,"idle":0,"done":2,"workspaces":1,"projects":["docs-site"],"agentList":[{"title":"Upgrade the search index","status":"done","pane":"w1:p1","seq":12},{"title":"Fix the broken anchor links","status":"done","pane":"w1:p2","seq":13}],"windowAddress":""},
+{"key":"local:9","name":"9","machine":"Local","remote":false,"isDefault":false,"running":false,"version":"","agents":0,"working":0,"blocked":0,"idle":0,"done":0,"workspaces":0,"projects":[],"agentList":[],"windowAddress":""}
 ],"running":3,"agents":5,"blocked":1,"done":2,"working":1}
 DEMO
 }
@@ -232,8 +247,12 @@ window_map() {
       [[ ${words[i]##*/} == herdr ]] || continue
       # `herdr server` is the background process, not a window's client.
       [[ ${words[i + 1]-} == server ]] && return 1
+      # A remote attach is its own machine, not a window for the local session
+      # with the same name. The background bridge has the same ambiguity.
+      [[ ${words[i + 1]-} == remote-client-bridge ]] && return 1
       name=default
       for ((j = i + 1; j < ${#words[@]}; j++)); do
+        [[ ${words[j]} == --remote ]] && return 1
         [[ ${words[j]} == --session ]] || continue
         name=${words[j + 1]-}
         break
@@ -290,11 +309,62 @@ snapshot_for() {
   printf '%s' "$out"
 }
 
+# Herdr 0.9 machine profiles each point at one remote session. The public CLI
+# does not expose the client's combined in-memory inventory, so read that
+# session over the same non-interactive SSH route Herdr configured. A failed
+# machine contributes a stopped row instead of taking the local list down.
+remote_snapshot_for() {
+  local target="$1" name="$2" out
+  valid_ssh_target "$target" || return 1
+  valid_session_name "$name" || return 1
+  command -v ssh >/dev/null 2>&1 || return 1
+  command -v timeout >/dev/null 2>&1 || return 1
+
+  local -a command=(ssh -o BatchMode=yes -o ConnectTimeout=4
+    -o ServerAliveInterval=2 -o ServerAliveCountMax=1 -- "$target" herdr)
+  [[ $name == default ]] || command+=(--session "$name")
+  command+=(api snapshot)
+
+  out=$(timeout -k 1 6 "${command[@]}" 2>/dev/null |
+    head -c "$((SNAPSHOT_BYTE_CAP + 1))") || true
+  [[ -n $out ]] || return 1
+  over_byte_cap "$out" "$SNAPSHOT_BYTE_CAP" && return 1
+  printf '%s' "$out"
+}
+
+valid_snapshot() {
+  printf '%s' "$1" | jq -e '
+    (.result.snapshot | type) == "object" and
+    (.result.snapshot.agents | type) == "array" and
+    (.result.snapshot.workspaces | type) == "array" and
+    (.result.snapshot.version | type) == "string"' >/dev/null 2>&1
+}
+
 cmd_list() {
-  local sessions_json
+  local sessions_json machines_json catalog_json
   sessions_json=$(herdr session list --json 2>/dev/null | head -c "$((SESSIONS_BYTE_CAP + 1))") || true
   [[ -n $sessions_json ]] || die "could not reach herdr"
   over_byte_cap "$sessions_json" "$SESSIONS_BYTE_CAP" && die "session list too large to read safely"
+
+  machines_json=$(herdr machine list --json 2>/dev/null |
+    head -c "$((SESSIONS_BYTE_CAP + 1))") || true
+  if [[ -z $machines_json ]] || over_byte_cap "$machines_json" "$SESSIONS_BYTE_CAP" ||
+      ! printf '%s' "$machines_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    machines_json='[]'
+  fi
+
+  catalog_json=$(jq -cn --argjson local "$sessions_json" --argjson machines "$machines_json" \
+    --argjson machineCap "$MACHINE_COUNT_CAP" '
+      {sessions:
+        (($local.sessions // [])
+         | map(. + {key: ("local:" + .name), machine: "Local", remote: false}))
+        + ($machines
+           | map(select(.enabled == true))[:$machineCap]
+           | map({key: ("remote:" + .id), name: (.session // "default"),
+                  default: ((.session // "default") == "default"),
+                  running: false, machine: .label, machine_id: .id,
+                  target: .target, remote: true}))}' 2>/dev/null) ||
+    die "unexpected machine list from herdr"
 
   local windows
   windows=$(window_map || true)
@@ -314,14 +384,17 @@ cmd_list() {
   # in. Reading it is what makes a stopped row say what it is holding rather
   # than only that it is down - the difference between a session worth starting
   # back up and a name left over from an afternoon.
-  local snapshots='' saved='' name is_default running dir snap labels
+  local snapshots='' saved='' key name is_default running dir remote machine_id target snap labels
+  local poll_dir='' poll_file runtime_dir
+  local -a remote_keys=() remote_files=() remote_pids=()
   # Two ceilings on the loop itself. The per-source caps above bound any one
   # answer; these bound the sum of them, which is the case a hundred sessions
   # each just under their own limit would otherwise walk straight through.
   local seen=0 dropped=0
-  while IFS=$'\t' read -r name is_default running dir; do
-    [[ -n $name ]] || continue
+  while IFS=$'\x1f' read -r key name is_default running dir remote machine_id target; do
+    [[ -n $key && -n $name ]] || continue
     valid_session_name "$name" || continue
+    valid_session_key "$key" || continue
 
     if (( seen >= SESSION_COUNT_CAP )); then
       dropped=$(( dropped + 1 ))
@@ -333,9 +406,30 @@ cmd_list() {
     fi
     seen=$(( seen + 1 ))
 
+    if [[ $remote == true ]]; then
+      valid_machine_id "$machine_id" || continue
+      runtime_dir="${XDG_RUNTIME_DIR-}"
+      if [[ -z $poll_dir && -d $runtime_dir && ! -L $runtime_dir &&
+            $(stat -c '%u' -- "$runtime_dir" 2>/dev/null) == "$(id -u)" ]]; then
+        poll_dir=$(mktemp -d -p "$runtime_dir" omarchy-herdr-poll.XXXXXXXX) || poll_dir=''
+      fi
+      if [[ -n $poll_dir ]]; then
+        poll_file=$(mktemp -p "$poll_dir" snapshot.XXXXXXXX) || continue
+        remote_keys+=("$key")
+        remote_files+=("$poll_file")
+        remote_snapshot_for "$target" "$name" >"$poll_file" &
+        remote_pids+=("$!")
+      else
+        snap=$(remote_snapshot_for "$target" "$name") || continue
+        valid_snapshot "$snap" || continue
+        snapshots+="${snapshots:+,}\"$key\":$snap"
+      fi
+      continue
+    fi
+
     if [[ $running == true ]]; then
       snap=$(snapshot_for "$name" "$is_default") || continue
-      snapshots+="${snapshots:+,}\"$name\":$snap"
+      snapshots+="${snapshots:+,}\"$key\":$snap"
       continue
     fi
 
@@ -355,8 +449,23 @@ cmd_list() {
                     | unique' -- "$dir/session.json" 2>/dev/null) || continue
     [[ -n $labels ]] || continue
     saved+="${saved:+,}\"$name\":$labels"
-  done < <(printf '%s' "$sessions_json" |
-    jq -r '.sessions[]? | "\(.name)\t\(.default // false)\t\(.running // false)\t\(.session_dir // "")"')
+  done < <(printf '%s' "$catalog_json" |
+      jq -r '.sessions[]? | [.key, .name, (.default // false), (.running // false),
+                              (.session_dir // ""), (.remote // false),
+                              (.machine_id // ""), (.target // "")]
+             | map(tostring) | join("\u001f")')
+
+  local i
+  for ((i = 0; i < ${#remote_pids[@]}; i++)); do
+    wait "${remote_pids[i]}" 2>/dev/null || true
+    snap=$(head -c "$((SNAPSHOT_BYTE_CAP + 1))" -- "${remote_files[i]}" 2>/dev/null) || true
+    if [[ -n $snap ]] && ! over_byte_cap "$snap" "$SNAPSHOT_BYTE_CAP" && valid_snapshot "$snap"; then
+      snapshots+="${snapshots:+,}\"${remote_keys[i]}\":$snap"
+    fi
+    rm -f -- "${remote_files[i]}"
+  done
+  [[ -z $poll_dir ]] || rmdir -- "$poll_dir" 2>/dev/null || true
+
   snapshots="{$snapshots}"
   saved="{$saved}"
   printf '%s' "$saved" | jq -e . >/dev/null 2>&1 || saved="{}"
@@ -364,7 +473,7 @@ cmd_list() {
   # whole list down with it.
   printf '%s' "$snapshots" | jq -e . >/dev/null 2>&1 || snapshots='{}'
 
-  printf '%s' "$sessions_json" | jq -c \
+  printf '%s' "$catalog_json" | jq -c \
     --argjson snapshots "$snapshots" \
     --argjson saved "$saved" \
     --argjson agentCap "$AGENT_COUNT_CAP" \
@@ -372,8 +481,9 @@ cmd_list() {
     ($windows | split("\n") | map(select(length > 0) | split("\t"))
       | map({key: .[0], value: .[1]}) | from_entries) as $win
     | [.sessions[]?
-       | .name as $name
-       | (($snapshots[$name].result.snapshot) // {}) as $snap
+        | .name as $name
+        | .key as $key
+        | (($snapshots[$key].result.snapshot) // {}) as $snap
        | ($snap.agents // []) as $agents
        # Workspace labels live on the workspace, the agent only carries the id
        # it sits in, so they are joined here rather than in the panel: one
@@ -382,9 +492,13 @@ cmd_list() {
           | map({key: (.workspace_id // ""), value: (.label // "")})
           | from_entries) as $wslabels
        | {
-           name: $name,
-           isDefault: (.default // false),
-           running: (.running // false),
+            name: $name,
+            key: $key,
+            machine: (.machine // "Local"),
+            remote: (.remote // false),
+            isDefault: (.default // false),
+            running: (if (.remote // false) then ($snap | length) > 0
+                      else (.running // false) end),
            version: ($snap.version // ""),
            agents: ($agents | length),
            working: ([$agents[] | select(.agent_status == "working")] | length),
@@ -418,11 +532,12 @@ cmd_list() {
                                  # than whatever the server happened to list first. The counts
                                  # above stay honest: they are taken from the full set.
                                  | .[0:$agentCap]),
-           projects: (if (.running // false)
+            projects: (if ((.remote // false) and (($snap | length) > 0)) or
+                             ((.remote // false) == false and (.running // false))
                       then (($snap.workspaces // []) | map(.label // "")
                             | map(select(length > 0)) | unique)
                       else ($saved[$name] // []) end),
-           windowAddress: ($win[$name] // "")
+            windowAddress: (if (.remote // false) then "" else ($win[$name] // "") end)
          }]
     | sort_by([(if .isDefault then 0 else 1 end),
                (if .running then 0 else 1 end),
@@ -507,10 +622,45 @@ show_session() {
   return 0
 }
 
+resolve_remote_machine() {
+  local id="$1" row
+  valid_machine_id "$id" || return 1
+  row=$(herdr machine list --json 2>/dev/null | jq -r --arg id "$id" '
+    .[]? | select(.id == $id and .enabled == true)
+    | "\(.target)\t\(.session // "default")"' | head -n 1) || return 1
+  IFS=$'\t' read -r remote_target remote_session <<<"$row"
+  valid_ssh_target "${remote_target-}" || return 1
+  valid_session_name "${remote_session-}" || return 1
+}
+
+show_remote_session() {
+  local id="$1"
+  resolve_remote_machine "$id" || return 1
+
+  local -a herdr_cmd=(herdr --remote "$remote_target")
+  [[ $remote_session == default ]] || herdr_cmd+=(--session "$remote_session")
+
+  local -a launch=()
+  if command -v uwsm-app >/dev/null 2>&1; then launch=(setsid uwsm-app --); else launch=(setsid); fi
+  if command -v foot >/dev/null 2>&1; then
+    launch+=(foot "--app-id=$APP_ID" "--working-directory=$HOME" -e "${herdr_cmd[@]}")
+  elif command -v xdg-terminal-exec >/dev/null 2>&1; then
+    launch+=(xdg-terminal-exec "--app-id=$APP_ID" "--dir=$HOME" -- "${herdr_cmd[@]}")
+  else
+    return 1
+  fi
+  "${launch[@]}" >/dev/null 2>&1 &
+  disown
+}
+
 cmd_open() {
-  local name="${1-}"
-  valid_session_name "$name" || die "not a session name"
-  show_session "$name" || die "no terminal available"
+  local key="${1-}"
+  valid_session_key "$key" || die "not a session key"
+  if [[ $key == local:* ]]; then
+    show_session "${key#local:}" || die "no terminal available"
+  else
+    show_remote_session "${key#remote:}" || die "remote machine is unavailable"
+  fi
   printf '{"ok":true}\n'
 }
 
@@ -522,9 +672,22 @@ cmd_open() {
 # `herdr agent focus` switches workspace and tab inside the session on its
 # own; the hyprctl half below is only about which window is in front of you.
 cmd_focus() {
-  local name="${1-}" pane="${2-}"
-  valid_session_name "$name" || die "not a session name"
+  local key="${1-}" pane="${2-}" name
+  valid_session_key "$key" || die "not a session key"
   valid_pane_id "$pane" || die "not a pane id"
+
+  if [[ $key == remote:* ]]; then
+    resolve_remote_machine "${key#remote:}" || die "remote machine is unavailable"
+    local -a remote_cmd=(ssh -o BatchMode=yes -o ConnectTimeout=4 -- "$remote_target" herdr)
+    [[ $remote_session == default ]] || remote_cmd+=(--session "$remote_session")
+    remote_cmd+=(agent focus "$pane")
+    timeout -k 1 6 "${remote_cmd[@]}" >/dev/null 2>&1 || true
+    show_remote_session "${key#remote:}" || die "no terminal available"
+    printf '{"ok":true}\n'
+    return
+  fi
+
+  name=${key#local:}
 
   # No `--` before the pane id: herdr does not take one, and valid_pane_id has
   # already refused anything but two runs of letters, digits, dash and
@@ -579,7 +742,9 @@ socket_of() {
 # close its sockets leaves no stale ones behind, and on a healthy server the
 # first signal is all it takes. The default session is killed like any other.
 cmd_kill() {
-  local name="${1-}"
+  local key="${1-}" name
+  [[ $key == local:* ]] || die "remote servers are not killed from this widget"
+  name=${key#local:}
   valid_session_name "$name" || die "not a session name"
 
   local pid
@@ -597,7 +762,9 @@ cmd_kill() {
 }
 
 cmd_delete() {
-  local name="${1-}"
+  local key="${1-}" name
+  [[ $key == local:* ]] || die "remote sessions are not deleted from this widget"
+  name=${key#local:}
   valid_session_name "$name" || die "not a session name"
   [[ $name == default ]] && die "the default session is not deleted from here"
   # No `--` before the name: herdr's argument parser does not take one, and a

@@ -1,7 +1,8 @@
 # Herdr for Omarchy
 
-A bar widget for [herdr](https://herdr.dev): how many herdr servers are
-running, what is inside each one, and one click to open it.
+A bar widget for [herdr](https://herdr.dev) 0.9: how many local and saved
+remote Herdr machines are running, what is inside each one, and one click to
+open it.
 
 Herdr runs one server per named session. They are easy to start and they never
 stop by themselves, because closing a window detaches rather than ends the
@@ -12,13 +13,15 @@ list one click away.
 
 ## What it shows
 
-The bar carries the number of running servers, on a badge sitting in the top
+The bar carries the number of running machines, on a badge sitting in the top
 right corner of the icon. It turns red when an agent is blocked and waiting on
 an answer, green when work finished while you were looking elsewhere, and amber
 while something is still running. When every agent is idle there is nothing to
 say, so the badge goes away and the icon stands on its own.
 
-Each row in the panel is one session:
+Each row in the panel is one local session or one enabled Herdr 0.9 machine
+profile. Remote rows use the profile label, such as **Build PC**, and a profile
+for a named remote session is shown as **Build PC / agents**.
 
 - its name, in bold when a window is already showing it
 - the projects open inside it, taken from the workspace labels
@@ -65,6 +68,11 @@ one colour.
   whatever the session was last showing: its pane is focused inside the server
   first, then the window comes up. That also marks a finished agent as seen, so
   clicking the line that says **done** is what clears it.
+- Remote rows open with `herdr --remote` using the saved machine profile. The
+  widget reads their snapshots over non-interactive SSH, so key-based SSH
+  authentication must already work. Remote profiles are polled concurrently;
+  an unavailable machine remains visible as stopped without discarding local
+  session data.
 - **The skull** (or `k`) ends that server, and is the only way it is ended from
   here. It asks first, and the dialog opens on **Cancel** rather than on the
   confirming side: a dialog that destroys something on a reflexive Enter is
@@ -74,7 +82,9 @@ one colour.
   wedged to read that socket never hears the request and the button looks
   broken at exactly the moment you needed it. This signals the process instead:
   TERM first, and KILL a second later if that was not enough. The shared
-  session is killed like any other, because it wedges like any other.
+  session is killed like any other, because it wedges like any other. Remote
+  rows do not expose kill or delete controls; manage those servers through
+  Herdr itself.
 - **The bin** (or `x`) throws away a session that is already stopped - the
   directory and the state herdr kept in it - which is what clears it out of the
   list for good. It takes the same slot as the skull, because a session is
@@ -142,7 +152,9 @@ omarchy plugin enable jankeesvw.herdr
 omarchy bar move jankeesvw.herdr --section right
 ```
 
-Needs `herdr`, `jq` and `hyprctl` on `$PATH`. The last one is what pairs a
+Needs herdr 0.9, `jq`, `ssh`, `timeout` and `hyprctl` on `$PATH`. `ssh` reads
+enabled profiles from `herdr machine list`; `timeout` bounds each unreachable
+remote poll. `hyprctl` is what pairs a
 session with the window showing it; without Hyprland the list still works, but
 every session looks like it has no window and a click opens a new one. `ss`
 (from iproute2) is what the skull button uses to find the process behind a
