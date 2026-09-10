@@ -92,7 +92,7 @@ Panel {
   property bool reachable: true
   property string errorText: ""
   // Session the script is currently acting on, so its row can dim.
-  property string pendingName: ""
+  property string pendingKey: ""
   // The session the kill dialog is asking about, held while it is open.
   property var killTarget: null
   property bool confirmOpen: false
@@ -200,6 +200,10 @@ Panel {
     return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(name))
   }
 
+  function validKey(key) {
+    return /^(local:[A-Za-z0-9][A-Za-z0-9._-]{0,63}|remote:[a-f0-9]{32})$/.test(String(key))
+  }
+
   // Pane ids are herdr's own opaque handles - "w1:p2" - and travel back out
   // as an argument the same way names do.
   function validPane(pane) {
@@ -218,10 +222,10 @@ Panel {
     listProc.running = true
   }
 
-  function run(action, name, extra) {
-    if (!validName(name) || actionProc.running) return
-    pendingName = name
-    var command = [root.script, action, name]
+  function run(action, key, extra) {
+    if (!validKey(key) || actionProc.running) return
+    pendingKey = key
+    var command = [root.script, action, key]
     if (extra !== undefined && extra !== "") command.push(extra)
     actionProc.command = command
     actionProc.running = true
@@ -237,8 +241,8 @@ Panel {
 
   // Focus the window this session is already showing, or open one.
   function openSession(session) {
-    if (!session || !validName(session.name)) return
-    run("open", session.name)
+    if (!session || !validKey(session.key)) return
+    run("open", session.key)
     dismiss()
   }
 
@@ -255,8 +259,8 @@ Panel {
   function focusAgent(session, agent) {
     if (!session || !agent) return
     if (!validPane(agent.pane)) { openSession(session); return }
-    if (!validName(session.name)) return
-    run("focus", session.name, agent.pane)
+    if (!validKey(session.key)) return
+    run("focus", session.key, agent.pane)
     dismiss()
   }
 
@@ -266,8 +270,8 @@ Panel {
   // to the same row. The shared session is herdr's own and is not deleted from
   // here at all.
   function removeSession(session) {
-    if (!session || session.isDefault || session.running) return
-    run("delete", session.name)
+    if (!session || session.remote || session.isDefault || session.running) return
+    run("delete", session.key)
   }
 
   // How a running server is ended here, and the only way: `herdr session stop`
@@ -278,8 +282,8 @@ Panel {
   //
   // The shared session is killed like any other. It wedges like any other.
   function killSession(session) {
-    if (!session || !session.running || !validName(session.name)) return
-    run("kill", session.name)
+    if (!session || session.remote || !session.running || !validKey(session.key)) return
+    run("kill", session.key)
   }
 
   // Killing is the one thing here that cannot be taken back: the server is
@@ -292,7 +296,7 @@ Panel {
   // ConfirmDialog's own default: a dialog that destroys something on a
   // reflexive Enter is worse than no dialog, because it trains the reflex.
   function askKill(session) {
-    if (!session || !session.running || !validName(session.name)) return
+    if (!session || session.remote || !session.running || !validKey(session.key)) return
     killTarget = session
     confirmOpen = true
     if (activeCard) activeCard.beginConfirm()
@@ -434,6 +438,7 @@ Panel {
   // the cursor must step over it rather than park on a dead control.
   function lastColumnFor(session) {
     if (!session) return root.columnRow
+    if (session.remote) return root.columnOpen
     if (session.running) return root.columnDestroy
     return session.isDefault ? root.columnOpen : root.columnDestroy
   }
@@ -537,6 +542,8 @@ Panel {
   // which is worth saying out loud.
   function sessionLabel(session) {
     if (!session) return ""
+    if (session.remote) return session.isDefault
+      ? session.machine : session.machine + " / " + session.name
     if (session.isDefault) return "Shared session"
     if (/^[0-9]+$/.test(session.name)) return "Workspace " + session.name
     return session.name
@@ -655,7 +662,7 @@ Panel {
   }
 
   function titleText() {
-    var s = runningCount === 1 ? " server" : " servers"
+    var s = runningCount === 1 ? " machine" : " machines"
     var a = agentCount === 1 ? " agent" : " agents"
     return "Herdr (" + runningCount + s + ", " + agentCount + a + ")"
   }
@@ -664,7 +671,7 @@ Panel {
   // tooltip is where that gets spelled out, and where a herd that wants
   // something says so before the panel is even open.
   function tooltipText() {
-    var parts = [runningCount + (runningCount === 1 ? " herdr server" : " herdr servers"),
+    var parts = [runningCount + (runningCount === 1 ? " Herdr machine" : " Herdr machines"),
                  agentCount + (agentCount === 1 ? " agent" : " agents")]
     if (blockedCount > 0) parts.push(blockedCount + " waiting on you")
     if (doneCount > 0) parts.push(doneCount + " finished")
@@ -688,7 +695,7 @@ Panel {
       var agents = session.agentList || []
       for (var j = 0; j < agents.length; j++) {
         if (!root.agentWants(agents[j].status)) continue
-        var key = root.agentKey(session.name, agents[j].pane)
+        var key = root.agentKey(session.key, agents[j].pane)
         wantingNow[key] = true
         if (root.wantingBefore[key]) continue
         if (freshest === null || (agents[j].seq || 0) > freshest.seq)
@@ -762,7 +769,7 @@ Panel {
   Process {
     id: actionProc
     onExited: function(exitCode) {
-      root.pendingName = ""
+      root.pendingKey = ""
       // A stopped server disappears from the list, and a freshly opened
       // window takes a moment to register its agents. One beat, then look
       // again.

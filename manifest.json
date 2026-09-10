@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "jankeesvw.herdr",
   "name": "Herdr",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Jankees",
-  "description": "Running herdr servers in the bar, with every agent inside them, and a click that lands you on the one you picked",
+  "description": "Local and remote Herdr 0.9 machines in the bar, with every agent inside them, and a click that lands you on the one you picked",
   "homepage": "https://github.com/jankeesvw/omarchy-herdr",
   "license": "MIT",
   "kinds": [
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Herdr",
-    "description": "Running herdr servers in the bar, with every agent inside them, and a click that lands you on the one you picked",
+    "description": "Local and remote Herdr 0.9 machines in the bar, with every agent inside them, and a click that lands you on the one you picked",
     "category": "Apps",
     "allowMultiple": false,
     "defaultSection": "right"

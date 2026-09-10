@@ -239,7 +239,7 @@ PanelKeyCatcher {
         width: list.width - (list.interactive ? Style.space(10) : 0)
         height: rowContent.implicitHeight + Style.space(10)
         radius: Style.cornerRadius
-        opacity: panel.pendingName === modelData.name ? 0.4 : 1
+        opacity: panel.pendingKey === modelData.key ? 0.4 : 1
         color: active
           ? Qt.rgba(panel.foreground.r, panel.foreground.g, panel.foreground.b, 0.08)
           : "transparent"
@@ -458,7 +458,7 @@ PanelKeyCatcher {
                   color: panel.agentColor(agentRow.modelData.status)
 
                   SequentialAnimation on opacity {
-                    running: panel.blinking(row.modelData.name, agentRow.modelData)
+                    running: panel.blinking(row.modelData.key, agentRow.modelData)
                     loops: Animation.Infinite
                     alwaysRunToEnd: true
                     NumberAnimation { to: 0.25; duration: 600; easing.type: Easing.InOutQuad }
@@ -603,7 +603,7 @@ PanelKeyCatcher {
                 id: killButton
                 hasCursor: panel.cursorOnSession(row.index)
                   && panel.column === panel.columnDestroy
-                visible: row.modelData.running
+                visible: row.modelData.running && !row.modelData.remote
                 iconText: panel.iconKill
                 tooltipText: "Kill this server"
                 foreground: Qt.darker(panel.foreground, 1.4)
@@ -616,7 +616,7 @@ PanelKeyCatcher {
               PanelActionButton {
                 hasCursor: panel.cursorOnSession(row.index)
                   && panel.column === panel.columnDestroy
-                visible: !row.modelData.running && !row.modelData.isDefault
+                visible: !row.modelData.remote && !row.modelData.running && !row.modelData.isDefault
                 iconText: panel.iconTrash
                 tooltipText: "Delete this session"
                 foreground: Qt.darker(panel.foreground, 1.4)
@@ -645,7 +645,7 @@ PanelKeyCatcher {
         anchors.centerIn: parent
         width: parent.width
         horizontalAlignment: Text.AlignHCenter
-        text: "No herdr sessions"
+        text: "No Herdr machines"
         textFormat: Text.PlainText
         font.family: panel.fontFamily
         font.pixelSize: Style.font.caption
