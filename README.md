@@ -132,6 +132,10 @@ The same view closer in makes the machine and agent states easier to read:
 
 ![A closer view of the Herdr panel showing Local and Build PC](assets/screenshot-detail.png)
 
+The panel follows Omarchy's active theme, including light themes:
+
+![The Herdr panel using the Catppuccin Latte theme](assets/screenshot-light.png)
+
 The data script has a demo mode, so a screenshot never carries real project
 names or agent titles and looks the same in a year:
 
