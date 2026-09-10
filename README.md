@@ -9,7 +9,7 @@ stop by themselves, because closing a window detaches rather than ends the
 session. So they pile up unseen. This widget puts the count in the bar and the
 list one click away.
 
-![The Herdr panel open on a desktop, listing four sessions with the agents inside each](assets/screenshot.png)
+![The Herdr panel open on an empty workspace, listing local and remote machines with their agents](assets/screenshot.png)
 
 ## What it shows
 
@@ -128,9 +128,9 @@ Position, size and screen are kept in this widget's own entry in `~/.config/omar
 
 ## Screenshots
 
-It follows the theme, so it reads the same on a light one:
+The same view closer in makes the machine and agent states easier to read:
 
-![The same panel on a light theme, with every status colour still legible](assets/screenshot-light.png)
+![A closer view of the Herdr panel showing Local and Build PC](assets/screenshot-detail.png)
 
 The data script has a demo mode, so a screenshot never carries real project
 names or agent titles and looks the same in a year:
