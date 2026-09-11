@@ -79,6 +79,10 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   property var sessions: []
+  // The enabled SSH machines from `herdr machine list` and whether each one
+  // answered the last poll. Sessions carry their machine as machineId; this
+  // list is what knows a machine exists when it is down and has no rows.
+  property var machines: []
   property int runningCount: 0
   property int agentCount: 0
   property int blockedCount: 0
@@ -91,8 +95,9 @@ Panel {
     blockedCount > 0 || doneCount > 0 || workingCount > 0
   property bool reachable: true
   property string errorText: ""
-  // Session the script is currently acting on, so its row can dim.
-  property string pendingName: ""
+  // Session the script is currently acting on, so its row can dim. Keyed by
+  // machine as well as name: two machines can both have a "default".
+  property string pendingKey: ""
   // The session the kill dialog is asking about, held while it is open.
   property var killTarget: null
   property bool confirmOpen: false
@@ -206,6 +211,12 @@ Panel {
     return /^[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{1,32}$/.test(String(pane))
   }
 
+  // Machine ids are herdr's own opaque profile ids and travel back out as an
+  // argument the same way names do, so they get the same fence.
+  function validMachine(id) {
+    return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(id))
+  }
+
   // Markup stripped rather than escaped: the bar tooltip is the shell's own
   // component, so `textFormat` there is not ours to set.
   function plain(s) {
@@ -218,11 +229,29 @@ Panel {
     listProc.running = true
   }
 
-  function run(action, name, extra) {
-    if (!validName(name) || actionProc.running) return
-    pendingName = name
-    var command = [root.script, action, name]
+  // A session row's identity across machines: a name alone stops being an
+  // address the moment two machines both have a "default".
+  function rowKey(session) {
+    return String(session.machineId || "") + "\u0000" + String(session.name)
+  }
+
+  function pending(session) {
+    return session && pendingKey !== "" && pendingKey === rowKey(session)
+  }
+
+  // Every action carries the session's machine with it. What travels is the
+  // machine id, not the ssh target - the script resolves the id back against
+  // `herdr machine list`, so the target is what herdr says it is right now,
+  // not what a stale payload claimed. Kill and delete stay local by policy:
+  // the script refuses them for remote sessions too.
+  function run(action, session, extra) {
+    if (!session || !validName(session.name) || actionProc.running) return
+    var remote = session.remote === true
+    if (remote && !validMachine(session.machineId)) return
+    pendingKey = rowKey(session)
+    var command = [root.script, action, session.name]
     if (extra !== undefined && extra !== "") command.push(extra)
+    if (remote) command.push(session.machineId)
     actionProc.command = command
     actionProc.running = true
   }
@@ -238,7 +267,7 @@ Panel {
   // Focus the window this session is already showing, or open one.
   function openSession(session) {
     if (!session || !validName(session.name)) return
-    run("open", session.name)
+    run("open", session)
     dismiss()
   }
 
@@ -256,7 +285,7 @@ Panel {
     if (!session || !agent) return
     if (!validPane(agent.pane)) { openSession(session); return }
     if (!validName(session.name)) return
-    run("focus", session.name, agent.pane)
+    run("focus", session, agent.pane)
     dismiss()
   }
 
@@ -267,7 +296,11 @@ Panel {
   // here at all.
   function removeSession(session) {
     if (!session || session.isDefault || session.running) return
-    run("delete", session.name)
+    // Deleting a directory on another machine from a bar widget is a way to
+    // lose work you cannot see; remote rows are opened and focused, never
+    // ended from here.
+    if (session.remote === true) return
+    run("delete", session)
   }
 
   // How a running server is ended here, and the only way: `herdr session stop`
@@ -279,7 +312,8 @@ Panel {
   // The shared session is killed like any other. It wedges like any other.
   function killSession(session) {
     if (!session || !session.running || !validName(session.name)) return
-    run("kill", session.name)
+    if (session.remote === true) return
+    run("kill", session)
   }
 
   // Killing is the one thing here that cannot be taken back: the server is
@@ -293,6 +327,7 @@ Panel {
   // reflexive Enter is worse than no dialog, because it trains the reflex.
   function askKill(session) {
     if (!session || !session.running || !validName(session.name)) return
+    if (session.remote === true) return
     killTarget = session
     confirmOpen = true
     if (activeCard) activeCard.beginConfirm()
@@ -542,6 +577,33 @@ Panel {
     return session.name
   }
 
+  // The machine a session runs on, for the dim prefix in front of its name.
+  // Local sessions get none: the panel is about this machine by default, and
+  // a label that says so on every row is noise. Herdr itself shows its
+  // `machine` token only once more than one machine is present, and a remote
+  // row is exactly when there is something to distinguish.
+  function machineName(session) {
+    if (!session || session.remote !== true) return ""
+    return session.machineLabel || session.sshTarget || ""
+  }
+
+  // The machines that did not answer the last poll, as one line. A machine
+  // that is down has no rows of its own, so without this it would vanish
+  // silently - the worst shape for the machine your agents are on.
+  function unreachableText() {
+    var names = []
+    for (var i = 0; i < machines.length; i++) {
+      var m = machines[i]
+      if (m.ok === true) continue
+      var label = m.label || m.target || m.id
+      if (m.error && m.error !== "" && m.error !== "unreachable")
+        label += " (" + m.error + ")"
+      names.push(label)
+    }
+    if (names.length === 0) return ""
+    return "unreachable: " + names.join(", ")
+  }
+
   // A stopped session names what it is holding rather than only saying it is
   // down: herdr keeps the layout in session.json, so the workspaces and the
   // directories they were opened in survive the server. That is the difference
@@ -671,8 +733,11 @@ Panel {
     return parts.join(", ")
   }
 
-  function agentKey(sessionName, pane) {
-    return String(sessionName) + "\u0000" + String(pane)
+  // Pane ids are scoped to one server, so the machine is part of the key:
+  // two machines can both have a "default" session holding a "w1:p1".
+  function agentKey(session, pane) {
+    return String(session.machineId || "") + "\u0000"
+      + String(session.name) + "\u0000" + String(pane)
   }
 
   // Everything that is asking for something right now, and which of those is
@@ -688,7 +753,7 @@ Panel {
       var agents = session.agentList || []
       for (var j = 0; j < agents.length; j++) {
         if (!root.agentWants(agents[j].status)) continue
-        var key = root.agentKey(session.name, agents[j].pane)
+        var key = root.agentKey(session, agents[j].pane)
         wantingNow[key] = true
         if (root.wantingBefore[key]) continue
         if (freshest === null || (agents[j].seq || 0) > freshest.seq)
@@ -706,9 +771,9 @@ Panel {
     root.attentionPrimed = true
   }
 
-  function blinking(sessionName, agent) {
-    if (!agent || root.attentionKey === "") return false
-    return root.agentKey(sessionName, agent.pane) === root.attentionKey
+  function blinking(session, agent) {
+    if (!session || !agent || root.attentionKey === "") return false
+    return root.agentKey(session, agent.pane) === root.attentionKey
   }
 
   function applyPayload(text) {
@@ -718,6 +783,7 @@ Panel {
       errorText = data.error || ""
       if (!reachable) return
       sessions = data.sessions || []
+      machines = data.machines || []
       updateAttention(sessions)
       if (opened && !cursorPlaced) {
         cursor = bestRow()
@@ -762,7 +828,7 @@ Panel {
   Process {
     id: actionProc
     onExited: function(exitCode) {
-      root.pendingName = ""
+      root.pendingKey = ""
       // A stopped server disappears from the list, and a freshly opened
       // window takes a moment to register its agents. One beat, then look
       // again.

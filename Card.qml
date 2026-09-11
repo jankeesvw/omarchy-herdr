@@ -45,6 +45,7 @@ PanelKeyCatcher {
     var count = 2
     var height = headerRow.height + rule.height
     if (staleBox.visible) { count += 1; height += staleBox.height }
+    if (machineBox.visible) { count += 1; height += machineBox.height }
     if (emptyBox.visible) { count += 1; height += emptyBox.height }
     return height + content.spacing * count
   }
@@ -208,6 +209,28 @@ PanelKeyCatcher {
       }
     }
 
+    // Machines that did not answer the last poll. A machine that is down
+    // has no rows of its own, so without this line it would vanish silently
+    // - the worst shape for the machine your agents are on.
+    Item {
+      id: machineBox
+      width: parent.width
+      visible: panel.unreachableText() !== ""
+      height: visible ? machineWarning.implicitHeight + Style.space(6) : 0
+
+      Text {
+        id: machineWarning
+        anchors.verticalCenter: parent.verticalCenter
+        width: parent.width
+        text: panel.unreachableText()
+        textFormat: Text.PlainText
+        elide: Text.ElideRight
+        font.family: panel.fontFamily
+        font.pixelSize: Style.font.caption
+        color: Qt.darker(panel.urgent, 1.2)
+      }
+    }
+
     // --------------------------------------------------------- list
 
     ListView {
@@ -239,7 +262,7 @@ PanelKeyCatcher {
         width: list.width - (list.interactive ? Style.space(10) : 0)
         height: rowContent.implicitHeight + Style.space(10)
         radius: Style.cornerRadius
-        opacity: panel.pendingName === modelData.name ? 0.4 : 1
+        opacity: panel.pending(modelData) ? 0.4 : 1
         color: active
           ? Qt.rgba(panel.foreground.r, panel.foreground.g, panel.foreground.b, 0.08)
           : "transparent"
@@ -292,9 +315,26 @@ PanelKeyCatcher {
               width: parent.width
               height: name.implicitHeight
 
+              // The machine a remote session runs on, as a dim prefix in
+              // front of its name. Local rows get nothing: the panel is
+              // about this machine by default, and a label that says so on
+              // every row is noise.
+              Text {
+                id: machine
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                visible: text !== ""
+                text: panel.machineName(row.modelData)
+                textFormat: Text.PlainText
+                font.family: panel.fontFamily
+                font.pixelSize: Style.font.body
+                color: Qt.darker(panel.foreground, 1.7)
+              }
+
               Text {
                 id: name
-                anchors.left: parent.left
+                anchors.left: machine.visible ? machine.right : parent.left
+                anchors.leftMargin: machine.visible ? Style.space(4) : 0
                 anchors.right: counts.left
                 anchors.rightMargin: Style.space(6)
                 anchors.verticalCenter: parent.verticalCenter
@@ -458,7 +498,7 @@ PanelKeyCatcher {
                   color: panel.agentColor(agentRow.modelData.status)
 
                   SequentialAnimation on opacity {
-                    running: panel.blinking(row.modelData.name, agentRow.modelData)
+                    running: panel.blinking(row.modelData, agentRow.modelData)
                     loops: Animation.Infinite
                     alwaysRunToEnd: true
                     NumberAnimation { to: 0.25; duration: 600; easing.type: Easing.InOutQuad }
@@ -595,6 +635,9 @@ PanelKeyCatcher {
             //
             // The shared session is herdr's own, so it can be killed but
             // never deleted - hence the empty slot there once it is down.
+            // Remote rows leave the slot empty too: ending something on
+            // another machine, from a bar, is a way to lose work you cannot
+            // see, so the panel offers it for local sessions only.
             Item {
               width: killButton.width
               height: killButton.height
@@ -603,7 +646,7 @@ PanelKeyCatcher {
                 id: killButton
                 hasCursor: panel.cursorOnSession(row.index)
                   && panel.column === panel.columnDestroy
-                visible: row.modelData.running
+                visible: row.modelData.running && !row.modelData.remote
                 iconText: panel.iconKill
                 tooltipText: "Kill this server"
                 foreground: Qt.darker(panel.foreground, 1.4)
@@ -617,6 +660,7 @@ PanelKeyCatcher {
                 hasCursor: panel.cursorOnSession(row.index)
                   && panel.column === panel.columnDestroy
                 visible: !row.modelData.running && !row.modelData.isDefault
+                  && !row.modelData.remote
                 iconText: panel.iconTrash
                 tooltipText: "Delete this session"
                 foreground: Qt.darker(panel.foreground, 1.4)
