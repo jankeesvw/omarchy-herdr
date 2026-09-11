@@ -66,16 +66,11 @@ Panel {
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color accent: Color.accent
   readonly property color urgent: bar ? bar.urgent : Color.urgent
-  // Omarchy themes carry a foreground, an accent and an urgent, and no green.
-  // "Finished" is green everywhere there is a build, a test or a task list, and
-  // borrowing the accent for it would leave a finished agent looking exactly
-  // like a working one - which is the distinction this widget exists to draw.
-  // So this one colour is picked rather than themed.
-  readonly property color finished: "#5FA46B"
-  // Working is amber for the same reason, and because it used to borrow the
-  // accent: on a theme whose accent is red or green, "busy" was indistinguish-
-  // able from "needs you" or "finished" - the two the badge exists to separate.
-  readonly property color working: "#D6A84B"
+  // Optional shell.toml roles follow theme switches. Without them, retain the
+  // original green for done, amber badge and accent-coloured working rows.
+  readonly property color finished: Color.pick("herdr.done", "#5FA46B")
+  readonly property color working: Color.pick("herdr.working", "#D6A84B")
+  readonly property color workingForeground: Color.pick("herdr.working", root.accent)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   property var sessions: []
@@ -606,7 +601,7 @@ Panel {
   function agentColor(status) {
     if (status === "blocked") return root.urgent
     if (status === "done") return root.finished
-    if (status === "working") return root.accent
+    if (status === "working") return root.workingForeground
     return Qt.darker(root.foreground, 1.9)
   }
 
@@ -637,14 +632,14 @@ Panel {
     if (!session) return root.foreground
     if ((session.blocked || 0) > 0) return root.urgent
     if ((session.done || 0) > 0) return root.finished
-    return root.accent
+    return root.workingForeground
   }
 
   function statusColor(session) {
     if (!session || !session.running) return Qt.darker(root.foreground, 2.2)
     if ((session.blocked || 0) > 0) return root.urgent
     if ((session.done || 0) > 0) return root.finished
-    if ((session.working || 0) > 0) return root.accent
+    if ((session.working || 0) > 0) return root.workingForeground
     return Qt.darker(root.foreground, 1.7)
   }
 
