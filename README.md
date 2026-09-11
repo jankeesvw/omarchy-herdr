@@ -149,6 +149,27 @@ every session looks like it has no window and a click opens a new one. `ss`
 session's socket, and a window is opened in `foot`, falling back to
 `xdg-terminal-exec`.
 
+## Theme colours
+
+Themes can optionally set the done and working colours in their `shell.toml`:
+
+```toml
+[herdr]
+done = "#006800"
+working = "#6f5500"
+```
+
+These example colours are from Modus Operandi. `done` colours the finished
+labels, dots, row highlights and count badge. `working` colours the working
+labels, dots and count badge. Both follow Omarchy theme switches; choose
+colours that remain readable on the panel background and behind badge text.
+
+Without these entries, the widget keeps its original colours: green for done,
+amber for the working badge and the theme accent for working labels and dots.
+The blocked state continues to use the theme's urgent colour. These entries
+can also be set in `~/.config/omarchy/shell.toml`, where they override the
+selected theme.
+
 ## Removing it
 
 ```bash

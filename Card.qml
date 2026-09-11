@@ -265,7 +265,7 @@ PanelKeyCatcher {
           spacing: Style.space(7)
 
           // The dot is the session's own state at a glance: red when an
-          // agent in there is blocked, accent while one is working, grey
+          // agent in there is blocked, working colour while one is working, grey
           // when it is idle and fainter still when the server is down.
           Item {
             width: Style.space(14)
