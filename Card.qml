@@ -470,15 +470,15 @@ PanelKeyCatcher {
                 // An agent that wants something is written at full
                 // strength; the rest stay dimmed, so the line worth
                 // reading is the one that stands out of the column.
-                // Which workspace inside the server this agent sits in.
-                // Herdr names them and the name is how you think about the
-                // work, but until now it only appeared merged into the
-                // session subtitle, where it said nothing about which
-                // agent was where.
+                // Where inside the server this agent sits: its workspace,
+                // then its tab. Herdr names both and the names are how you
+                // think about the work, but until now the workspace only
+                // appeared merged into the session subtitle and the tab
+                // not at all, neither of which said which agent was where.
                 //
                 // Dimmed and capped at a share of the row, because it is
                 // the address and the title is the thing: a long workspace
-                // name must never be what pushes the title out.
+                // or tab name must never be what pushes the title out.
                 Text {
                   id: agentWorkspace
                   anchors.left: agentDot.right
@@ -488,7 +488,7 @@ PanelKeyCatcher {
                   anchors.top: parent.top
                   anchors.topMargin: agentRow.pad
                   visible: text !== ""
-                  text: agentRow.modelData.workspace || ""
+                  text: panel.agentPlace(agentRow.modelData)
                   textFormat: Text.PlainText
                   elide: Text.ElideRight
                   font.family: panel.fontFamily

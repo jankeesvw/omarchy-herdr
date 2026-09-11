@@ -603,6 +603,18 @@ Panel {
     return session.agentList || []
   }
 
+  // The address of the work: the workspace it sits in, then the tab inside
+  // that workspace. Either half can be empty - herdr only hands back a label
+  // a tab or workspace was given - so the line is whichever parts exist, and
+  // nothing at all when neither does.
+  function agentPlace(agent) {
+    if (!agent) return ""
+    var parts = []
+    if (agent.workspace) parts.push(agent.workspace)
+    if (agent.tab) parts.push(agent.tab)
+    return parts.join("  ·  ")
+  }
+
   function agentColor(status) {
     if (status === "blocked") return root.urgent
     if (status === "done") return root.finished
