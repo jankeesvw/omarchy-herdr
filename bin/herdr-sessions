@@ -364,12 +364,39 @@ cmd_list() {
   # whole list down with it.
   printf '%s' "$snapshots" | jq -e . >/dev/null 2>&1 || snapshots='{}'
 
+  # The two objects assembled above go in through FILES, not through argv.
+  #
+  # Linux caps a single argument at MAX_ARG_STRLEN, 32 pages, which is 131072
+  # bytes on a 4 KiB-page machine. That ceiling is per argument and has nothing
+  # to do with the 2 MiB ARG_MAX that bounds the whole list, so a snapshot well
+  # under every limit this script checks can still fail. On a session with 66
+  # agents, 149 tabs and 22 workspaces the snapshot came to 155814 bytes,
+  # execve returned E2BIG, and jq never ran. Because jq's stderr is discarded
+  # here, the only thing that reached the panel was the fallback string:
+  # "unexpected output from herdr". Measured on that machine: 131000 bytes is
+  # accepted, 131072 is not.
+  #
+  # The byte caps at the top of this script are 2 MiB, sixteen times the real
+  # per-argument ceiling, so nothing here could see the wall coming. Read from
+  # files, those 2 MiB become the limit that actually applies.
+  local jq_dir
+  jq_dir="$(mktemp -d)" || die "could not create a temporary directory"
+  # shellcheck disable=SC2064
+  trap "rm -rf -- '$jq_dir'" RETURN
+  printf '%s' "$snapshots" > "$jq_dir/snapshots.json"
+  printf '%s' "$saved" > "$jq_dir/saved.json"
+
   printf '%s' "$sessions_json" | jq -c \
-    --argjson snapshots "$snapshots" \
-    --argjson saved "$saved" \
+    --slurpfile snapshotsFile "$jq_dir/snapshots.json" \
+    --slurpfile savedFile "$jq_dir/saved.json" \
     --argjson agentCap "$AGENT_COUNT_CAP" \
     --arg windows "$windows" '
-    ($windows | split("\n") | map(select(length > 0) | split("\t"))
+    # --slurpfile hands over an array of the JSON texts in the file, so the
+    # object each one holds is at [0]. Bound back to the names the program
+    # below already used.
+    ($snapshotsFile[0] // {}) as $snapshots
+    | ($savedFile[0] // {}) as $saved
+    | ($windows | split("\n") | map(select(length > 0) | split("\t"))
       | map({key: .[0], value: .[1]}) | from_entries) as $win
     | [.sessions[]?
        | .name as $name
