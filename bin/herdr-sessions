@@ -7,13 +7,25 @@
 # window that is showing each session, and prints one object the panel can
 # draw without any further work.
 #
-#   list          every session, running or stopped
-#   open <name>   focus the window showing that session, or open one
-#   focus <name> <pane>
+#   list          every session, running or stopped, here and on each
+#                 enabled SSH machine from `herdr machine list`
+#   open <name> [machine]
+#                 focus the window showing that session, or open one
+#   focus <name> <pane> [machine]
 #                 the same, but land on one agent's pane inside it
 #   kill <name>   signal the session's server until it is gone
 #   delete <name> remove a stopped session's directory
 #   demo on|off   invented sessions instead of yours, for screenshots
+#
+# A machine argument is a herdr machine profile id; the ssh target it means
+# is read back out of `herdr machine list`, never taken from the caller. A
+# machine's sessions are read through `herdr --machine <id> api snapshot`,
+# herdr's own command routing over the profile's ssh, so there is no ssh
+# plumbing of this script's own to keep compatible with the far end. Both
+# ends need herdr 0.9.1 or newer for remote rows.
+# Kill and delete stay local: signalling a process or deleting a directory
+# on another machine from a bar widget is a way to lose work you cannot
+# see, so the panel does not offer them for remote sessions.
 #
 # Demo mode exists so a screenshot never carries real project names or agent
 # titles, and so it looks the same in a year. Every write is a no-op while it
@@ -59,6 +71,9 @@ SESSION_FILE_CAP=$((1 * 1024 * 1024))
 TOTAL_BYTE_CAP=$((8 * 1024 * 1024))
 SESSION_COUNT_CAP=200
 AGENT_COUNT_CAP=500
+# The machine catalog is a handful of small rows, and one machine's snapshot
+# answer is bounded by the same per-session ceiling as a local one.
+MACHINES_BYTE_CAP=$((256 * 1024))
 
 # Whether a read came back at its ceiling, which means there was more to come.
 # Callers pipe through `head -c cap+1`, so that one extra byte is the evidence.
@@ -88,6 +103,19 @@ valid_session_name() {
 # before they reach a command line, refused rather than repaired.
 valid_pane_id() {
   [[ "${1-}" =~ ^[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_-]{1,32}$ ]]
+}
+
+# A machine id is herdr's opaque profile id; a target is whatever ssh would
+# dial - a host, user@host, or an ssh:// URL with a port. Both travel from a
+# file on disk to a command line, so both are checked for shape first. The
+# target pattern also answers option injection: nothing matching it can
+# begin with a dash.
+valid_machine_id() {
+  [[ "${1-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+}
+
+valid_machine_target() {
+  [[ "${1-}" =~ ^(ssh://)?([A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+(:[0-9]{1,5})?$ ]]
 }
 
 # A directory someone else can write to is a directory that can hand this
@@ -132,19 +160,29 @@ cmd_demo() {
 
 # Invented, but modelled on real work rather than made into a joke: a session
 # waiting on an approval, one that finished while nobody was looking, one still
-# going, and one whose server has been left behind.
+# going, one whose server has been left behind, and one machine away - plus a
+# machine that cannot be reached, because that is what a laptop looks like
+# with the office box asleep.
 demo_list() {
   cat <<'DEMO'
-{"ok":true,"error":"","sessions":[
+{"ok":true,"error":"","machines":[{"id":"m1","label":"buildbox","target":"buildbox","ok":true,"error":""},{"id":"m2","label":"gpu-01","target":"gpu-01","ok":false,"error":"unreachable"}],"sessions":[
 {"name":"default","isDefault":true,"running":true,"version":"0.8.2","agents":2,"working":1,"blocked":0,"idle":1,"done":0,"workspaces":2,"projects":["checkout-service","design-tokens"],"agentList":[{"title":"Rewrite the receipt formatter","status":"working","pane":"w1:p1","workspace":"checkout-service","tab":"Receipts","seq":11},{"title":"Token names for the new palette","status":"idle","pane":"w2:p1","workspace":"design-tokens","tab":"Palette","seq":9}],"windowAddress":"0x1"},
 {"name":"3","isDefault":false,"running":true,"version":"0.8.2","agents":1,"working":0,"blocked":1,"idle":0,"done":0,"workspaces":1,"projects":["billing-api"],"agentList":[{"title":"Drop the legacy invoice table","status":"blocked","pane":"w1:p1","workspace":"billing-api","tab":"Migration","seq":14}],"windowAddress":"0x2"},
 {"name":"5","isDefault":false,"running":true,"version":"0.8.2","agents":2,"working":0,"blocked":0,"idle":0,"done":2,"workspaces":1,"projects":["docs-site"],"agentList":[{"title":"Upgrade the search index","status":"done","pane":"w1:p1","workspace":"docs-site","tab":"Search","seq":12},{"title":"Fix the broken anchor links","status":"done","pane":"w1:p2","workspace":"docs-site","tab":"Anchors","seq":13}],"windowAddress":""},
-{"name":"9","isDefault":false,"running":false,"version":"","agents":0,"working":0,"blocked":0,"idle":0,"done":0,"workspaces":0,"projects":[],"agentList":[],"windowAddress":""}
-],"running":3,"agents":5,"blocked":1,"done":2,"working":1}
+{"name":"9","isDefault":false,"running":false,"version":"","agents":0,"working":0,"blocked":0,"idle":0,"done":0,"workspaces":0,"projects":[],"agentList":[],"windowAddress":""},
+{"name":"default","isDefault":true,"running":true,"version":"0.9.0","agents":1,"working":0,"blocked":1,"idle":0,"done":0,"workspaces":1,"projects":["render-farm"],"agentList":[{"title":"Rebuild the light baker","status":"blocked","pane":"w1:p1","workspace":"render-farm","tab":"Lights","seq":15}],"windowAddress":"","machineId":"m1","machineLabel":"buildbox","sshTarget":"buildbox","remote":true}
+],"running":4,"agents":6,"blocked":2,"done":2,"working":1}
 DEMO
 }
 
 require_tools() {
+  # The panel's shell is not a login shell, and an install put down by mise,
+  # cargo or the curl script is often not on its PATH. Look where those
+  # installers put things before declaring herdr missing - the alternative is
+  # a bar that reports "herdr is not installed" on a machine where it plainly
+  # is.
+  command -v herdr >/dev/null 2>&1 || \
+    PATH="$HOME/.local/bin:$HOME/bin:$HOME/.local/share/mise/installs/herdr/latest:$HOME/.cargo/bin:/usr/local/bin:$PATH"
   local tool
   for tool in herdr jq; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
@@ -177,7 +215,8 @@ parent_pid() {
 # up to their window instead: a process named exactly `herdr` is the client,
 # `herdr server` is not.
 #
-# Prints "session<TAB>address<TAB>workspace" per line. Sessions without a
+# Prints "ssh-target<TAB>session<TAB>address<TAB>workspace" per line; the
+# target is empty for a window onto a local server. Sessions without a
 # window are absent.
 window_map() {
   command -v hyprctl >/dev/null 2>&1 || return 0
@@ -209,37 +248,51 @@ window_map() {
     args_of[$pid]=$args
   done < <(ps -eo pid=,args= 2>/dev/null | grep -E 'her[d]r')
 
-  declare -A seen=()
+  declare -A emitted=()
 
   emit() {
-    local session="$1" window="$2"
-    [[ -n ${seen[$session]-} ]] && return 0
-    seen[$session]=1
-    printf '%s\t%s\n' "$session" "$window"
+    local target="$1" session="$2" window="$3"
+    [[ -n ${emitted[$target/$session]-} ]] && return 0
+    emitted[$target/$session]=1
+    printf '%s\t%s\t%s\n' "$target" "$session" "$window"
   }
 
   # Read a session name out of a command line that runs herdr. The answer
   # comes back in $found_session rather than on stdout: a command
   # substitution forks a subshell, and this is called once per process on the
   # machine. Through a `$()` it cost a third of a second per refresh.
-  local found_session=""
+  #
+  # A window onto a remote session carries `--remote <target>` on the same
+  # command line, and the target is half of the window's identity: two
+  # machines can both show a session called "default".
+  local found_session="" found_target=""
   session_in_args() {
     found_session=""
+    found_target=""
     local -a words
     read -r -a words <<<"${1-}"
-    local i j name
+    local i j name target
     for ((i = 0; i < ${#words[@]}; i++)); do
       [[ ${words[i]##*/} == herdr ]] || continue
-      # `herdr server` is the background process, not a window's client.
-      [[ ${words[i + 1]-} == server ]] && return 1
+      # A window's client carries flags and nothing else: `herdr`,
+      # `herdr --session <name>`, `herdr --remote <target> [--session <n>]`.
+      # Any other bare word is a subcommand - `server`, the `client` helper a
+      # --remote attach forks, a one-shot CLI call like `api snapshot` run
+      # from a pane - and none of those say which window shows a session.
       name=default
+      target=""
       for ((j = i + 1; j < ${#words[@]}; j++)); do
-        [[ ${words[j]} == --session ]] || continue
-        name=${words[j + 1]-}
-        break
+        case ${words[j]} in
+          --session) name=${words[j + 1]-}; j=$((j + 1)) ;;
+          --remote) target=${words[j + 1]-}; j=$((j + 1)) ;;
+          -*) ;;
+          *) return 1 ;;
+        esac
       done
       valid_session_name "$name" || return 1
+      [[ -z $target ]] || valid_machine_target "$target" || return 1
       found_session=$name
+      found_target=$target
       return 0
     done
     return 1
@@ -248,7 +301,7 @@ window_map() {
   # The terminal's own command line first: that is how the launcher starts one.
   for pid in "${!window_of_pid[@]}"; do
     session_in_args "${args_of[$pid]-}" || continue
-    emit "$found_session" "${window_of_pid[$pid]}"
+    emit "$found_target" "$found_session" "${window_of_pid[$pid]}"
   done
 
   # Then anything started by hand, walked up from the client to its window.
@@ -260,7 +313,7 @@ window_map() {
       ancestor=$(parent_pid "$ancestor") || break
       [[ -n $ancestor && $ancestor != 0 && $ancestor != 1 ]] || break
       if [[ -n ${window_of_pid[$ancestor]-} ]]; then
-        emit "$found_session" "${window_of_pid[$ancestor]}"
+        emit "$found_target" "$found_session" "${window_of_pid[$ancestor]}"
         break
       fi
     done
@@ -290,14 +343,89 @@ snapshot_for() {
   printf '%s' "$out"
 }
 
-cmd_list() {
+# Session rows from a session list plus its servers' snapshots: the one jq
+# program that turns what herdr says into what the panel draws. The local
+# list and each remote machine's answer both go through it, so a row means
+# the same thing no matter which host it came from. `sessions` is what
+# `herdr session list` prints (a remote call fakes a one-row list for the
+# profile's session, the only one `--machine` can reach), `snapshots` keys
+# each session's `api snapshot` answer by name, and `saved` holds the labels
+# a stopped session's session.json remembered.
+readonly ROWS_JQ='
+    [.sessions[]?
+       | .name as $name
+       | (($snapshots[$name].result.snapshot) // {}) as $snap
+       | ($snap.agents // []) as $agents
+       # Workspace labels live on the workspace, the agent only carries the id
+       # it sits in, so they are joined here rather than in the panel: one
+       # place turns what herdr says into what gets drawn.
+       | (($snap.workspaces // [])
+          | map({key: (.workspace_id // ""), value: (.label // "")})
+          | from_entries) as $wslabels
+       # Tab names live on the tab and the agent only carries the id it sits
+       # in - the same join as the workspace labels above. A tab nobody named
+       # comes back with its number as the label ("1"), and that is not a name
+       # worth printing after every workspace, so those join as empty.
+       | (($snap.tabs // [])
+          | map({key: (.tab_id // ""),
+                 value: (if (.label // "") == ((.number // "") | tostring)
+                         then "" else (.label // "") end)})
+          | from_entries) as $tablabels
+       | {
+           name: $name,
+           isDefault: (.default // false),
+           running: (.running // false),
+           version: ($snap.version // ""),
+           agents: ($agents | length),
+           working: ([$agents[] | select(.agent_status == "working")] | length),
+           blocked: ([$agents[] | select(.agent_status == "blocked")] | length),
+           idle:    ([$agents[] | select(.agent_status == "idle")] | length),
+           done:    ([$agents[] | select(.agent_status == "done")] | length),
+           workspaces: (($snap.workspaces // []) | length),
+           agentList: ($agents
+                       | map({title: (.terminal_title_stripped // .terminal_title // ""),
+                              status: (.agent_status // "unknown"),
+                              pane: (.pane_id // ""),
+                              workspace: ($wslabels[.workspace_id // ""] // ""),
+                              tab: ($tablabels[.tab_id // ""] // ""),
+                              # Herdr bumps this every time an agent changes
+                              # state. Passed through so the panel can tell
+                              # two agents that both want something apart by
+                              # which one spoke last.
+                              seq: (.state_change_seq // 0)})
+                       | map(select(.title != ""))
+                       # The attention queue herdr uses itself, the order its
+                       # own agent panel takes when agent_panel_sort is set to
+                       # priority: what wants an answer, then what finished
+                       # unseen, then what is busy, then what is only waiting
+                       # for you to type. Sorting is stable in jq, so agents
+                       # sharing a state keep the order herdr laid them out in.
+                       | sort_by(if   .status == "blocked" then 0
+                                 elif .status == "done"    then 1
+                                 elif .status == "working" then 2
+                                 elif .status == "idle"    then 3
+                                 else 4 end)
+                                 # After the sort, so the cap keeps what wants an answer rather
+                                 # than whatever the server happened to list first. The counts
+                                 # above stay honest: they are taken from the full set.
+                                 | .[0:$agentCap]),
+           projects: (if (.running // false)
+                      then (($snap.workspaces // []) | map(.label // "")
+                            | map(select(length > 0)) | unique)
+                      else ($saved[$name] // []) end)
+         }]
+    | {ok: true, error: "", sessions: .}
+  '
+
+# This host's sessions, assembled into the array the panel draws. Windows are
+# not joined here: which window shows a session is a fact about the machine
+# the panel is on, not the one the session runs on, so the join happens in
+# cmd_list on the local side.
+collect_sessions() {
   local sessions_json
   sessions_json=$(herdr session list --json 2>/dev/null | head -c "$((SESSIONS_BYTE_CAP + 1))") || true
   [[ -n $sessions_json ]] || die "could not reach herdr"
   over_byte_cap "$sessions_json" "$SESSIONS_BYTE_CAP" && die "session list too large to read safely"
-
-  local windows
-  windows=$(window_map || true)
 
   # The snapshots are collected here rather than in jq, because each one is a
   # separate command. They go in as a name-keyed object, so the merge below is
@@ -368,96 +496,236 @@ cmd_list() {
     --argjson snapshots "$snapshots" \
     --argjson saved "$saved" \
     --argjson agentCap "$AGENT_COUNT_CAP" \
+    "$ROWS_JQ" 2>/dev/null || die "unexpected output from herdr"
+}
+
+# ------------------------------------------------------ saved SSH machines
+
+# The enabled machines from `herdr machine list`, normalised to the rows this
+# script dials. Any problem - an older herdr with no `machine` command at
+# all, an unreadable catalog, a reply too big to trust - means an empty list,
+# never an error: local sessions are the floor every install stands on, and
+# a machine herdr has forgotten is not worth an empty panel.
+machine_list() {
+  local out
+  out=$(herdr machine list --json 2>/dev/null | head -c "$((MACHINES_BYTE_CAP + 1))") || true
+  [[ -n $out ]] || { printf '[]'; return 0; }
+  over_byte_cap "$out" "$MACHINES_BYTE_CAP" && { printf '[]'; return 0; }
+  printf '%s' "$out" | jq -c '
+    if type != "array" then [] else
+      [.[] | select(type == "object" and .enabled == true)
+       | {id: (.id // ""), label: (.label // ""), target: (.target // ""),
+          # A machine profile points at exactly one session on the far end;
+          # that session is the only one `--machine` routing can reach, so it
+          # is the only remote row a machine gets.
+          session: (.session // "default")}
+       | select(.id != "" and .target != "")
+       | .label |= gsub("[\\t\\r\\n]+"; " ")]
+    end' 2>/dev/null || printf '[]'
+}
+
+# The ssh target behind a machine id, resolved from the live catalog rather
+# than trusted from the panel: the id is what travels back and forth, the
+# target is what herdr says it means right now.
+machine_target() {
+  valid_machine_id "${1-}" || return 1
+  local target
+  target=$(machine_list | jq -r --arg id "$1" \
+    '.[] | select(.id == $id) | .target' 2>/dev/null)
+  [[ -n $target ]] && valid_machine_target "$target" || return 1
+  printf '%s' "$target"
+}
+
+# Remote rows ride herdr's own command routing: `herdr --machine <id>`
+# runs a command on the machine's profile session over the ssh herdr already
+# knows how to make. It landed in 0.9.1, so an older local herdr gets no
+# remote rows rather than a dial that cannot work - and a far end too old to
+# answer is told apart by herdr itself, in the error it sends back.
+remote_floor_met() {
+  local v
+  v=$(herdr --version 2>/dev/null) || return 1
+  v=${v#herdr }
+  [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  [[ $(printf '%s\n' "$v" 0.9.1 | sort -V | head -1) == 0.9.1 ]]
+}
+
+# One machine's profile session, as the same {ok, sessions} the local
+# assembly prints: the snapshot goes through the shared ROWS_JQ behind a
+# one-row session list, so what a session row looks like is defined in
+# exactly one place. The whole call sits under `timeout` because a network
+# that goes quiet mid-answer must not hold the refresh. Stderr is kept on
+# $3: herdr's own error line is the reason the panel shows when the machine
+# cannot answer.
+machine_rows() {
+  local mid="$1" msession="$2" errlog="$3"
+  # The session name is spliced into a jq object below; checked for shape
+  # rather than escaped, the same as the local path's snapshot keys.
+  valid_session_name "$msession" || return 1
+  local out
+  # `|| true` because the cap in front of this can close the pipe on the
+  # server, and a SIGPIPE there is a bounded read rather than a failure.
+  out=$(timeout --signal=TERM 45 herdr --machine "$mid" api snapshot \
+    2>"$errlog" | head -c "$((SNAPSHOT_BYTE_CAP + 1))") || true
+  [[ -n $out ]] || return 1
+  over_byte_cap "$out" "$SNAPSHOT_BYTE_CAP" && return 1
+  # An answer without a snapshot is an error herdr printed, not a session.
+  printf '%s' "$out" | jq -e '.result.snapshot | objects' >/dev/null 2>&1 || return 1
+  jq -nc --arg name "$msession" \
+    '{sessions: [{name: $name, default: ($name == "default"), running: true, session_dir: ""}]}' \
+    | jq -c \
+      --argjson agentCap "$AGENT_COUNT_CAP" \
+      --argjson saved '{}' \
+      --argjson snapshots "{\"$msession\":$out}" \
+      "$ROWS_JQ" 2>/dev/null
+}
+
+# The reason a machine could not answer, for the panel's unreachable row.
+# herdr prints it as one stderr line inside a Rust error wrapper - the
+# wrapper is noise in a tooltip, so it is unwrapped when it has that shape.
+machine_error() {
+  local errlog="$1" err
+  err=$(sed -n 's/^Error: Custom { kind: [^,]*, error: "\(.*\)" }$/\1/p' \
+    "$errlog" 2>/dev/null | head -1) || true
+  [[ -n $err ]] || err=$(tr '[:cntrl:]' ' ' < "$errlog" 2>/dev/null | head -c 200) || true
+  err=${err%$'\n'}
+  printf '%s' "${err:-unreachable}"
+}
+
+# Every session the panel shows: this host's, plus each enabled machine's.
+# A machine that cannot be reached or cannot answer stays in the payload as
+# a row the panel marks unreachable; it never takes the local rows down with
+# it.
+cmd_list() {
+  local local_json
+  local_json=$(collect_sessions)
+  if [[ $(printf '%s' "$local_json" | jq -r '.ok // false' 2>/dev/null) != true ]]; then
+    local local_err
+    local_err=$(printf '%s' "$local_json" | jq -rj '.error // ""' 2>/dev/null) || true
+    die "${local_err:-could not reach herdr}"
+  fi
+
+  local machines_json
+  machines_json=$(machine_list)
+
+  local windows
+  windows=$(window_map || true)
+
+  # Machines are asked in parallel, each answer in a file of its own: a
+  # stalled dial must not hold the other machines' rows hostage.
+  local remote='' status_tsv=''
+  if [[ $machines_json != '[]' ]]; then
+    local poll_dir="$CACHE_DIR/poll" tmpdir
+    mkdir -p -- "$poll_dir" 2>/dev/null
+    [[ -d $poll_dir && ! -L $poll_dir ]] || die "could not use the cache directory"
+    chmod 700 -- "$poll_dir" 2>/dev/null || true
+    tmpdir=$(mktemp -d "$poll_dir/list.XXXXXX") || die "could not use the cache directory"
+    # Expanded now, not at trap time: a function local is out of scope by the
+    # time an EXIT trap runs, and `set -u` turns the late read into noise.
+    trap "rm -rf -- $(printf '%q' "$tmpdir")" EXIT
+
+    if remote_floor_met; then
+      local -a pids=()
+      local mid mlabel mtarget msession
+      while IFS=$'\t' read -r mid mlabel mtarget msession; do
+        [[ -n $mid ]] || continue
+        # A row not shaped like a machine is not ours to dial.
+        valid_machine_id "$mid" || continue
+        valid_machine_target "$mtarget" || continue
+        (
+          if rows=$(machine_rows "$mid" "$msession" "$tmpdir/$mid.errlog") \
+            && [[ $(printf '%s' "$rows" | jq -r '.ok // false' 2>/dev/null) == true ]]; then
+            printf '%s' "$rows" > "$tmpdir/$mid.json"
+          else
+            machine_error "$tmpdir/$mid.errlog" > "$tmpdir/$mid.err"
+          fi
+          rm -f -- "$tmpdir/$mid.errlog"
+        ) &
+        pids+=($!)
+      done < <(printf '%s' "$machines_json" | jq -r '.[] | "\(.id)\t\(.label)\t\(.target)\t\(.session)"')
+      ((${#pids[@]} == 0)) || wait "${pids[@]}" 2>/dev/null || true
+    else
+      # An older local herdr has no `--machine` to route through: one honest
+      # line per machine rather than a dial that cannot work.
+      while IFS=$'\t' read -r mid _ _ _; do
+        [[ -n $mid ]] || continue
+        valid_machine_id "$mid" || continue
+        printf 'needs herdr 0.9.1 or newer' > "$tmpdir/$mid.err"
+      done < <(printf '%s' "$machines_json" | jq -r '.[] | "\(.id)\t\(.label)\t\(.target)\t\(.session)"')
+    fi
+
+    # Results back into two things the merge below wants: the sessions each
+    # machine returned, as an id-keyed object, and one status line per
+    # machine for the panel's unreachable row.
+    local err
+    while IFS=$'\t' read -r mid mlabel mtarget msession; do
+      [[ -n $mid ]] || continue
+      valid_machine_id "$mid" || continue
+      if [[ -f $tmpdir/$mid.json ]]; then
+        remote+="${remote:+,}\"$mid\":$(cat -- "$tmpdir/$mid.json")"
+        status_tsv+="$mid"$'\t'"$mlabel"$'\t'"$mtarget"$'\t1\t'$'\n'
+      else
+        err=unreachable
+        [[ -f $tmpdir/$mid.err ]] && err=$(tr '[:cntrl:]' ' ' < "$tmpdir/$mid.err")
+        status_tsv+="$mid"$'\t'"$mlabel"$'\t'"$mtarget"$'\t0\t'"$err"$'\n'
+      fi
+    done < <(printf '%s' "$machines_json" | jq -r '.[] | "\(.id)\t\(.label)\t\(.target)"')
+  fi
+  remote="{$remote}"
+  printf '%s' "$remote" | jq -e . >/dev/null 2>&1 || remote='{}'
+
+  local machines_with_status
+  machines_with_status=$(printf '%s' "$status_tsv" | jq -Rn \
+    '[inputs | split("\t")
+      | {id: .[0], label: .[1], target: .[2], ok: (.[3] == "1"),
+         error: (.[4] // "")}]') || machines_with_status='[]'
+
+  printf '%s' "$local_json" | jq -c \
+    --argjson local "$local_json" \
+    --argjson machines "$machines_with_status" \
+    --argjson remote "$remote" \
     --arg windows "$windows" '
     ($windows | split("\n") | map(select(length > 0) | split("\t"))
-      | map({key: .[0], value: .[1]}) | from_entries) as $win
-    | [.sessions[]?
-       | .name as $name
-       | (($snapshots[$name].result.snapshot) // {}) as $snap
-       | ($snap.agents // []) as $agents
-       # Workspace labels live on the workspace, the agent only carries the id
-       # it sits in, so they are joined here rather than in the panel: one
-       # place turns what herdr says into what gets drawn.
-       | (($snap.workspaces // [])
-          | map({key: (.workspace_id // ""), value: (.label // "")})
-          | from_entries) as $wslabels
-       # Tab names live on the tab and the agent only carries the id it sits
-       # in - the same join as the workspace labels above. A tab nobody named
-       # comes back with its number as the label ("1"), and that is not a name
-       # worth printing after every workspace, so those join as empty.
-       | (($snap.tabs // [])
-          | map({key: (.tab_id // ""),
-                 value: (if (.label // "") == ((.number // "") | tostring)
-                         then "" else (.label // "") end)})
-          | from_entries) as $tablabels
-       | {
-           name: $name,
-           isDefault: (.default // false),
-           running: (.running // false),
-           version: ($snap.version // ""),
-           agents: ($agents | length),
-           working: ([$agents[] | select(.agent_status == "working")] | length),
-           blocked: ([$agents[] | select(.agent_status == "blocked")] | length),
-           idle:    ([$agents[] | select(.agent_status == "idle")] | length),
-           done:    ([$agents[] | select(.agent_status == "done")] | length),
-           workspaces: (($snap.workspaces // []) | length),
-           agentList: ($agents
-                       | map({title: (.terminal_title_stripped // .terminal_title // ""),
-                              status: (.agent_status // "unknown"),
-                              pane: (.pane_id // ""),
-                              workspace: ($wslabels[.workspace_id // ""] // ""),
-                              tab: ($tablabels[.tab_id // ""] // ""),
-                              # Herdr bumps this every time an agent changes
-                              # state. Passed through so the panel can tell
-                              # two agents that both want something apart by
-                              # which one spoke last.
-                              seq: (.state_change_seq // 0)})
-                       | map(select(.title != ""))
-                       # The attention queue herdr uses itself, the order its
-                       # own agent panel takes when agent_panel_sort is set to
-                       # priority: what wants an answer, then what finished
-                       # unseen, then what is busy, then what is only waiting
-                       # for you to type. Sorting is stable in jq, so agents
-                       # sharing a state keep the order herdr laid them out in.
-                       | sort_by(if   .status == "blocked" then 0
-                                 elif .status == "done"    then 1
-                                 elif .status == "working" then 2
-                                 elif .status == "idle"    then 3
-                                 else 4 end)
-                                 # After the sort, so the cap keeps what wants an answer rather
-                                 # than whatever the server happened to list first. The counts
-                                 # above stay honest: they are taken from the full set.
-                                 | .[0:$agentCap]),
-           projects: (if (.running // false)
-                      then (($snap.workspaces // []) | map(.label // "")
-                            | map(select(length > 0)) | unique)
-                      else ($saved[$name] // []) end),
-           windowAddress: ($win[$name] // "")
-         }]
-    | sort_by([(if .isDefault then 0 else 1 end),
+      | map({key: (.[0] + "\u0000" + .[1]), value: .[2]}) | from_entries) as $win
+    | ($machines | map({key: .id, value: .}) | from_entries) as $mach
+    | ([ $local.sessions[]
+         | . + {machineId: "", machineLabel: "", sshTarget: "", remote: false} ]
+       + [ $machines[] | select(.ok) | .id as $mid
+           | ($remote[$mid].sessions // [])[]
+           | . + {machineId: $mid,
+                  machineLabel: ($mach[$mid].label // ""),
+                  sshTarget: ($mach[$mid].target // ""),
+                  remote: true} ])
+    | map(. + {windowAddress: ($win[(.sshTarget + "\u0000" + .name)] // "")})
+    | sort_by([(if .machineId == "" then 0 else 1 end),
+               (.machineLabel | ascii_downcase),
+               (if .isDefault then 0 else 1 end),
                (if .running then 0 else 1 end),
                (.name | ascii_downcase)])
     | {ok: true,
        error: "",
+       machines: $machines,
        sessions: .,
        running: ([.[] | select(.running)] | length),
        agents: ([.[] | .agents] | add // 0),
        blocked: ([.[] | .blocked] | add // 0),
        done: ([.[] | .done] | add // 0),
        working: ([.[] | .working] | add // 0)}
-  ' 2>/dev/null || die "unexpected output from herdr"
+  ' 2>/dev/null --argjson local "$local_json" || die "unexpected output from herdr"
 }
 
 # ------------------------------------------------------------- open a session
 
 # Bring up the window showing a session, or start one. Returns 0 once
-# something has been done, 1 when no terminal could be started.
+# something has been done, 1 when no terminal could be started. A remote
+# session is matched and opened by its ssh target as well as its name: two
+# machines can both have a session called "default".
 show_session() {
-  local name="$1"
+  local name="$1" target="${2-}"
 
   local address workspace
   IFS=$'\t' read -r address workspace < <(
-    window_map | awk -F'\t' -v want="$name" '$1 == want { print $2 "\t" $3; exit }')
+    window_map | awk -F'\t' -v want_t="$target" -v want="$name" \
+      '$1 == want_t && $2 == want { print $3 "\t" $4; exit }')
 
   # Both values are spliced into a Lua expression, so they are checked for
   # shape first rather than escaped. A window address is hex; a workspace name
@@ -480,8 +748,10 @@ show_session() {
   # No window: open one. A numbered session is named after the Hyprland
   # workspace it belongs to, so it is opened there rather than on top of
   # whatever is in front of you - otherwise "Workspace 4" would land on
-  # workspace 7 and the name would stop meaning anything.
-  if [[ $name =~ ^[0-9]{1,3}$ ]]; then
+  # workspace 7 and the name would stop meaning anything. That convention is
+  # a local one; a session called 3 on another machine says nothing about
+  # the workspace in front of you.
+  if [[ -z $target && $name =~ ^[0-9]{1,3}$ ]]; then
     hyprctl dispatch "hl.dsp.focus({ workspace = '$name' })" >/dev/null 2>&1
   fi
 
@@ -489,8 +759,10 @@ show_session() {
   # under that name and only starts one when there is none, so the same
   # command covers a running session with no window and a stopped one. The
   # session keeps its own state, so the directory only matters the very first
-  # time a name is used.
+  # time a name is used. A remote session attaches the same way, through ssh:
+  # `--remote` is the attach form, and only the attach form takes it.
   local -a herdr_cmd=(herdr)
+  [[ -z $target ]] || herdr_cmd+=(--remote "$target")
   [[ $name == default ]] || herdr_cmd+=(--session "$name")
 
   # Foot by name rather than through xdg-terminal-exec: the app id is what
@@ -518,9 +790,13 @@ show_session() {
 }
 
 cmd_open() {
-  local name="${1-}"
+  local name="${1-}" machine="${2-}"
   valid_session_name "$name" || die "not a session name"
-  show_session "$name" || die "no terminal available"
+  local target=""
+  if [[ -n $machine ]]; then
+    target=$(machine_target "$machine") || die "no such machine"
+  fi
+  show_session "$name" "$target" || die "no terminal available"
   printf '{"ok":true}\n'
 }
 
@@ -532,7 +808,7 @@ cmd_open() {
 # `herdr agent focus` switches workspace and tab inside the session on its
 # own; the hyprctl half below is only about which window is in front of you.
 cmd_focus() {
-  local name="${1-}" pane="${2-}"
+  local name="${1-}" pane="${2-}" machine="${3-}"
   valid_session_name "$name" || die "not a session name"
   valid_pane_id "$pane" || die "not a pane id"
 
@@ -540,13 +816,21 @@ cmd_focus() {
   # already refused anything but two runs of letters, digits, dash and
   # underscore around a colon - so nothing here can arrive looking like an
   # option in the first place.
-  if [[ $name == default ]]; then
+  local target=""
+  if [[ -n $machine ]]; then
+    target=$(machine_target "$machine") || die "no such machine"
+    # The focus has to happen on the host that owns the agent: `--remote`
+    # attaches a UI, it does not retarget commands. `--machine` routes the
+    # command to the machine's own server instead, and the profile's session
+    # is the session it moves in - the one the row came from.
+    timeout --signal=TERM 15 herdr --machine "$machine" agent focus "$pane" >/dev/null 2>&1 || true
+  elif [[ $name == default ]]; then
     herdr agent focus "$pane" >/dev/null 2>&1 || true
   else
     herdr --session "$name" agent focus "$pane" >/dev/null 2>&1 || true
   fi
 
-  show_session "$name" || die "no terminal available"
+  show_session "$name" "$target" || die "no terminal available"
   printf '{"ok":true}\n'
 }
 
@@ -591,6 +875,8 @@ socket_of() {
 cmd_kill() {
   local name="${1-}"
   valid_session_name "$name" || die "not a session name"
+  # Killing by pid is a local act; a remote server is out of reach on purpose.
+  [[ -z ${2-} ]] || die "remote servers are not killed from here"
 
   local pid
   pid=$(server_pid_for "$(socket_of "$name")") || die "no running server for that session"
@@ -610,6 +896,7 @@ cmd_delete() {
   local name="${1-}"
   valid_session_name "$name" || die "not a session name"
   [[ $name == default ]] && die "the default session is not deleted from here"
+  [[ -z ${2-} ]] || die "remote sessions are not deleted from here"
   # No `--` before the name: herdr's argument parser does not take one, and a
   # session name has already been checked against the shape above.
   herdr session delete "$name" >/dev/null 2>&1 || true
@@ -624,10 +911,10 @@ case "${1:-list}" in
   list) if demo_on; then demo_list; else cmd_list; fi ;;
   # Every write is a no-op while the demo is on, so a click during a shoot
   # cannot reach a real session.
-  open) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_open "${1-}"; fi ;;
-  focus) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_focus "${1-}" "${2-}"; fi ;;
-  kill) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_kill "${1-}"; fi ;;
-  delete) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_delete "${1-}"; fi ;;
+  open) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_open "${1-}" "${2-}"; fi ;;
+  focus) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_focus "${1-}" "${2-}" "${3-}"; fi ;;
+  kill) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_kill "${1-}" "${2-}"; fi ;;
+  delete) shift; if demo_on; then printf '{"ok":true}\n'; else cmd_delete "${1-}" "${2-}"; fi ;;
   demo) shift; cmd_demo "${1-}" ;;
   *) die "unknown command" ;;
 esac
