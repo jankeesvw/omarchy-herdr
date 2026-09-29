@@ -42,6 +42,14 @@
 # shell.
 
 set -euo pipefail
+
+# Everything this script writes is private, but the terminal it opens is not
+# this script's to lock down: herdr starts the session's server from that
+# terminal when none is running, and every shell inside it inherits the umask.
+# Under 077 those shells create files nobody else can read, which is how a git
+# checkout ends up unreadable to a container. Keep the caller's umask for that
+# launch.
+readonly INHERITED_UMASK=$(umask)
 umask 077
 
 readonly APP_ID=org.omarchy.herdr
@@ -784,7 +792,7 @@ show_session() {
     return 1
   fi
 
-  "${launch[@]}" >/dev/null 2>&1 &
+  ( umask "$INHERITED_UMASK" && exec "${launch[@]}" ) >/dev/null 2>&1 &
   disown
   return 0
 }
