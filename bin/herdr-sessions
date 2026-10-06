@@ -359,8 +359,16 @@ snapshot_for() {
 # profile's session, the only one `--machine` can reach), `snapshots` keys
 # each session's `api snapshot` answer by name, and `saved` holds the labels
 # a stopped session's session.json remembered.
+#
+# All three come in on stdin, one JSON text after the other: the session list
+# first, then snapshots, then saved. Not through --argjson, because Linux caps
+# one argument at 128 KiB (MAX_ARG_STRLEN, 32 pages), far below the byte caps
+# above, and a snapshot of sixty-odd agents is past it: execve fails, jq never
+# starts, and the panel says "unexpected output from herdr" (#13).
 readonly ROWS_JQ='
-    [.sessions[]?
+    input as $snapshots
+    | input as $saved
+    | [.sessions[]?
        | .name as $name
        | (($snapshots[$name].result.snapshot) // {}) as $snap
        | ($snap.agents // []) as $agents
@@ -500,9 +508,7 @@ collect_sessions() {
   # whole list down with it.
   printf '%s' "$snapshots" | jq -e . >/dev/null 2>&1 || snapshots='{}'
 
-  printf '%s' "$sessions_json" | jq -c \
-    --argjson snapshots "$snapshots" \
-    --argjson saved "$saved" \
+  printf '%s\n%s\n%s\n' "$sessions_json" "$snapshots" "$saved" | jq -c \
     --argjson agentCap "$AGENT_COUNT_CAP" \
     "$ROWS_JQ" 2>/dev/null || die "unexpected output from herdr"
 }
@@ -578,13 +584,11 @@ machine_rows() {
   over_byte_cap "$out" "$SNAPSHOT_BYTE_CAP" && return 1
   # An answer without a snapshot is an error herdr printed, not a session.
   printf '%s' "$out" | jq -e '.result.snapshot | objects' >/dev/null 2>&1 || return 1
-  jq -nc --arg name "$msession" \
-    '{sessions: [{name: $name, default: ($name == "default"), running: true, session_dir: ""}]}' \
-    | jq -c \
-      --argjson agentCap "$AGENT_COUNT_CAP" \
-      --argjson saved '{}' \
-      --argjson snapshots "{\"$msession\":$out}" \
-      "$ROWS_JQ" 2>/dev/null
+  {
+    jq -nc --arg name "$msession" \
+      '{sessions: [{name: $name, default: ($name == "default"), running: true, session_dir: ""}]}'
+    printf '{"%s":%s}\n{}\n' "$msession" "$out"
+  } | jq -c --argjson agentCap "$AGENT_COUNT_CAP" "$ROWS_JQ" 2>/dev/null
 }
 
 # The reason a machine could not answer, for the panel's unreachable row.
@@ -687,12 +691,15 @@ cmd_list() {
       | {id: .[0], label: .[1], target: .[2], ok: (.[3] == "1"),
          error: (.[4] // "")}]') || machines_with_status='[]'
 
-  printf '%s' "$local_json" | jq -c \
-    --argjson local "$local_json" \
-    --argjson machines "$machines_with_status" \
-    --argjson remote "$remote" \
+  # On stdin for the same reason as ROWS_JQ: the local rows alone carry every
+  # agent title, and each machine's rows ride along in $remote. The window
+  # map stays an argument, at one short line per open herdr window.
+  printf '%s\n%s\n%s\n' "$local_json" "$machines_with_status" "$remote" | jq -c \
     --arg windows "$windows" '
-    ($windows | split("\n") | map(select(length > 0) | split("\t"))
+    . as $local
+    | input as $machines
+    | input as $remote
+    | ($windows | split("\n") | map(select(length > 0) | split("\t"))
       | map({key: (.[0] + "\u0000" + .[1]), value: .[2]}) | from_entries) as $win
     | ($machines | map({key: .id, value: .}) | from_entries) as $mach
     | ([ $local.sessions[]
@@ -718,7 +725,7 @@ cmd_list() {
        blocked: ([.[] | .blocked] | add // 0),
        done: ([.[] | .done] | add // 0),
        working: ([.[] | .working] | add // 0)}
-  ' 2>/dev/null --argjson local "$local_json" || die "unexpected output from herdr"
+  ' 2>/dev/null || die "unexpected output from herdr"
 }
 
 # ------------------------------------------------------------- open a session
