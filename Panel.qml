@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Herdr: how many herdr servers are running, and a way into each of them.
@@ -63,9 +64,9 @@ Panel {
   // nf-fa-thumb_tack, U+F08D.
   readonly property string iconPin: "\uF08D"
 
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color accent: Color.accent
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
+  readonly property color accent: Commons.Color.accent
+  readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   // Omarchy themes carry a foreground, an accent and an urgent, and no green.
   // "Finished" is green everywhere there is a build, a test or a task list, and
   // borrowing the accent for it would leave a finished agent looking exactly
@@ -82,8 +83,8 @@ Panel {
   // or an eight-digit hex means what it means everywhere else, and a typo
   // lands on the fallback instead of on black.
   function themeColor(key, fallback) {
-    var value = Color.pick(key, "")
-    return value ? Color.flatColor(value, fallback) : fallback
+    var value = Commons.Color.pick(key, "")
+    return value ? Commons.Color.flatColor(value, fallback) : fallback
   }
   readonly property color finished: themeColor("herdr.done", "#5FA46B")
   readonly property color working: themeColor("herdr.working", "#D6A84B")
@@ -939,7 +940,7 @@ Panel {
           // glyph it sits on, so the corner it covers still reads as a corner
           // and not as two shapes fused together.
           border.width: Math.round(Style.bar.iconFont * 0.06)
-          border.color: Color.bar.background
+          border.color: Commons.Color.bar.background
 
           Text {
             id: count
@@ -954,7 +955,7 @@ Panel {
             font.pixelSize: Math.round((badge.height - 2 * badge.border.width) * 0.88)
             font.bold: true
             renderType: Text.NativeRendering
-            color: Color.background
+            color: Commons.Color.background
           }
         }
       }
@@ -1045,7 +1046,7 @@ Panel {
     readonly property real borderWidth: Math.max(1, Style.space(2))
     readonly property bool active: pinCard.activeFocus
     readonly property var borderSpec: active
-      ? Border.surfaceSpec("popups", "border", Color.popups.border, borderWidth)
+      ? Border.surfaceSpec("popups", "border", Commons.Color.popups.border, borderWidth)
       : Border.flat(Qt.rgba(root.foreground.r, root.foreground.g,
                             root.foreground.b, 0.22), borderWidth)
     readonly property int padding: Style.spacing.popupPadding
@@ -1179,7 +1180,7 @@ Panel {
       id: card
       width: pinWindow.cardWidth
       height: pinWindow.cardHeight
-      color: Color.popups.background
+      color: Commons.Color.popups.background
       borderSpec: pinWindow.borderSpec
       padding: pinWindow.padding
       radius: Style.cornerRadius
