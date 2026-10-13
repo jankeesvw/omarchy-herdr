@@ -892,71 +892,73 @@ Panel {
     bar: root.bar
     opacity: root.reachable ? 1 : 0.5
     slotSize: root.barSlot
-    opticalSize: root.barContentWidth
     tooltipText: root.plain(root.tooltipText())
 
-    iconComponent: Component {
-      Item {
+    // Not an iconComponent: the shell scales that down to icon size, which
+    // would shrink the server count next to the icon to a smudge.
+    hasVisualContent: true
+
+    Item {
+      anchors.fill: parent
+      Text {
+        id: serverIcon
+        anchors.centerIn: parent
+        text: root.iconServer
+        textFormat: Text.PlainText
+        font.family: root.fontFamily
+        font.pixelSize: Style.bar.iconFont
+        renderType: Text.NativeRendering
+        // barForeground, not the theme's foreground: on a transparent bar
+        // the shell picks the glyph colour off what is behind it, so the
+        // icon turns dark over a light wallpaper the way every other bar
+        // icon does. The theme foreground is only right where the panel
+        // paints its own background.
+        //
+        // Nothing here reacts to the panel being open: the bar draws that
+        // itself, as an accent line on the module's inner edge, for every
+        // widget that has a panel. Tinting the glyph as well says the same
+        // thing twice, in the one colour that means something else.
+        color: root.barForeground
+      }
+
+      // The server count rides the glyph's top-right corner, the way an
+      // unread count rides an app icon, and is sized off the icon font so a
+      // theme that resizes the bar takes it along. The ratios are what the
+      // default 13px icon can carry: a 12px disc around a 9px digit. Three
+      // quarters of the glyph leaves the digit on 6px, which is a coloured
+      // speck rather than a count - unreadable at two digits - and the badge
+      // exists to say how many as much as it says which colour.
+      Rectangle {
+        id: badge
+        anchors.horizontalCenter: serverIcon.horizontalCenter
+        anchors.horizontalCenterOffset: Math.round(Style.bar.iconFont * 0.42)
+        anchors.verticalCenter: serverIcon.verticalCenter
+        anchors.verticalCenterOffset: -Math.round(Style.bar.iconFont * 0.40)
+        visible: root.reachable && root.runningCount > 0 && root.badgeActive
+        height: Math.round(Style.bar.iconFont * 0.95)
+        width: Math.max(height, count.implicitWidth + Math.round(height * 0.45))
+        radius: height / 2
+        color: root.badgeColor()
+        // A rim in the bar's own background separates the badge from the
+        // glyph it sits on, so the corner it covers still reads as a corner
+        // and not as two shapes fused together.
+        border.width: Math.round(Style.bar.iconFont * 0.06)
+        border.color: Commons.Color.bar.background
+
         Text {
-          id: serverIcon
+          id: count
           anchors.centerIn: parent
-          text: root.iconServer
+          // Centring the text item leaves the digit riding high: a line box
+          // reserves descender room a digit never uses. Nudge it back down
+          // onto the middle of the disc.
+          anchors.verticalCenterOffset: Math.round(font.pixelSize * 0.1)
+          text: root.runningCount
           textFormat: Text.PlainText
           font.family: root.fontFamily
-          font.pixelSize: Style.bar.iconFont
+          font.pixelSize: Math.round((badge.height - 2 * badge.border.width) * 0.88)
+          font.bold: true
           renderType: Text.NativeRendering
-          // barForeground, not the theme's foreground: on a transparent bar
-          // the shell picks the glyph colour off what is behind it, so the
-          // icon turns dark over a light wallpaper the way every other bar
-          // icon does. The theme foreground is only right where the panel
-          // paints its own background.
-          //
-          // Nothing here reacts to the panel being open: the bar draws that
-          // itself, as an accent line on the module's inner edge, for every
-          // widget that has a panel. Tinting the glyph as well says the same
-          // thing twice, in the one colour that means something else.
-          color: root.barForeground
-        }
-
-        // The server count rides the glyph's top-right corner, the way an
-        // unread count rides an app icon, and is sized off the icon font so a
-        // theme that resizes the bar takes it along. The ratios are what the
-        // default 13px icon can carry: a 12px disc around a 9px digit. Three
-        // quarters of the glyph leaves the digit on 6px, which is a coloured
-        // speck rather than a count - unreadable at two digits - and the badge
-        // exists to say how many as much as it says which colour.
-        Rectangle {
-          id: badge
-          anchors.horizontalCenter: serverIcon.horizontalCenter
-          anchors.horizontalCenterOffset: Math.round(Style.bar.iconFont * 0.42)
-          anchors.verticalCenter: serverIcon.verticalCenter
-          anchors.verticalCenterOffset: -Math.round(Style.bar.iconFont * 0.40)
-          visible: root.reachable && root.runningCount > 0 && root.badgeActive
-          height: Math.round(Style.bar.iconFont * 0.95)
-          width: Math.max(height, count.implicitWidth + Math.round(height * 0.45))
-          radius: height / 2
-          color: root.badgeColor()
-          // A rim in the bar's own background separates the badge from the
-          // glyph it sits on, so the corner it covers still reads as a corner
-          // and not as two shapes fused together.
-          border.width: Math.round(Style.bar.iconFont * 0.06)
-          border.color: Commons.Color.bar.background
-
-          Text {
-            id: count
-            anchors.centerIn: parent
-            // Centring the text item leaves the digit riding high: a line box
-            // reserves descender room a digit never uses. Nudge it back down
-            // onto the middle of the disc.
-            anchors.verticalCenterOffset: Math.round(font.pixelSize * 0.1)
-            text: root.runningCount
-            textFormat: Text.PlainText
-            font.family: root.fontFamily
-            font.pixelSize: Math.round((badge.height - 2 * badge.border.width) * 0.88)
-            font.bold: true
-            renderType: Text.NativeRendering
-            color: Commons.Color.background
-          }
+          color: Commons.Color.background
         }
       }
     }
