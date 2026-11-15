@@ -360,6 +360,11 @@ Panel {
 
   function killMessage() {
     if (!killTarget) return ""
+    // The desktop app's server is herdr-core, which holds every terminal and
+    // agent the app shows.
+    if (killTarget.app === true)
+      return "Stop herdr-core? Every terminal and agent in the Herdr app ends,"
+        + " and nothing running inside it is asked to stop first."
     return "Kill the server for " + sessionLabel(killTarget)
       + "? Nothing running inside it is asked to stop first."
   }
@@ -583,9 +588,13 @@ Panel {
   // "default" is herdr's own name for the shared session, and it reads as a
   // setting rather than a place. On another machine herdr names that session
   // after the machine, so the panel does too. A numbered one is a Hyprland
-  // workspace, which is worth saying out loud.
+  // workspace, which is worth saying out loud. The Herdr desktop app is one
+  // row of its own, called what it is.
   function sessionLabel(session) {
     if (!session) return ""
+    // The desktop app is not a named session at all; "herdr-app" is only the
+    // handle the script gives it.
+    if (session.app === true) return "Desktop app"
     if (session.isDefault && session.remote === true)
       return session.machineLabel || session.sshTarget || session.name
     if (session.isDefault) return "Shared session"

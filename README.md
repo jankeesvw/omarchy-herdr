@@ -149,6 +149,24 @@ call, and anything older simply gets no remote rows. Only machines from
 herdr's own catalog are ever asked, and a disabled machine is left alone, the
 same as in herdr's UI.
 
+## The Herdr desktop app
+
+The Herdr desktop app (`herdr-app`) keeps its terminals and agents in
+herdr-core, not in a classic herdr server, so they have no session of their
+own. When `hc` is on `$PATH` and the app holds live terminals, they appear as
+one extra row called **Desktop app**, counted and coloured like any other.
+
+- The agents come from `hc ls`; their state comes from `herdr-app ls` when the
+  app is running, because "seen" is the app's own knowledge and `hc` never
+  clears **done**. Without the app window the raw `hc` state is used.
+- **Click** the row to focus the app's window, or start it. Click an agent line
+  to focus that agent inside the app first.
+- **The skull** stops herdr-core: `hc server stop`, then TERM and KILL if it
+  does not answer. The dialog warns that every terminal and agent in the app
+  ends with it. The bin never shows on this row.
+- Nothing is added when `hc` is missing or holds no live terminals, so a
+  machine without the app sees no change.
+
 ## Screenshots
 
 It follows the theme, so it reads the same on a light one:
@@ -175,7 +193,7 @@ omarchy plugin enable jankeesvw.herdr
 omarchy bar move jankeesvw.herdr --section right
 ```
 
-Needs `herdr`, `jq` and `hyprctl` on `$PATH`. The last one is what pairs a
+Needs `herdr`, `jq` and `hyprctl` on `$PATH` (and `hc` for the desktop app row). The last one is what pairs a
 session with the window showing it; without Hyprland the list still works, but
 every session looks like it has no window and a click opens a new one. `ss`
 (from iproute2) is what the skull button uses to find the process behind a
