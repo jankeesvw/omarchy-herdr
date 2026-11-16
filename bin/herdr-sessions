@@ -191,10 +191,9 @@ require_tools() {
   # is.
   command -v herdr >/dev/null 2>&1 && command -v hc >/dev/null 2>&1 && command -v herdr-app >/dev/null 2>&1 || \
     PATH="${PATH:+$PATH:}$HOME/.local/bin:$HOME/bin:$HOME/.local/share/mise/installs/herdr/latest:$HOME/.cargo/bin:/usr/local/bin"
-  local tool
-  for tool in herdr jq; do
-    command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
-  done
+  command -v jq >/dev/null 2>&1 || die "jq is not installed"
+  # The desktop app alone is enough: its row comes from hc, not from herdr.
+  command -v herdr >/dev/null 2>&1 || command -v hc >/dev/null 2>&1 || die "herdr is not installed"
 }
 
 # ---------------------------------------------------------------- windows
@@ -438,6 +437,8 @@ readonly ROWS_JQ='
 # the panel is on, not the one the session runs on, so the join happens in
 # cmd_list on the local side.
 collect_sessions() {
+  # With only the desktop app installed there are no classic sessions to list.
+  command -v herdr >/dev/null 2>&1 || { printf '{"ok":true,"error":"","sessions":[]}'; return 0; }
   local sessions_json
   sessions_json=$(herdr session list --json 2>/dev/null | head -c "$((SESSIONS_BYTE_CAP + 1))") || true
   [[ -n $sessions_json ]] || die "could not reach herdr"
@@ -620,6 +621,8 @@ readonly APP_CLASS=herdr-app
 # open / kill / delete too. Focus is unambiguous: app panes start with "app:".
 is_app_session() {
   [[ ${1-} == "$APP_SESSION" ]] || return 1
+  # Without herdr there is no classic session to mistake it for.
+  command -v herdr >/dev/null 2>&1 || return 0
   # Only "yes, it is the app" when the classic list was read and does not hold
   # the name; an unreadable list must never route a kill at herdr-core.
   local list
