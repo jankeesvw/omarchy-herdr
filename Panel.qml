@@ -340,7 +340,9 @@ Panel {
   // reflexive Enter is worse than no dialog, because it trains the reflex.
   function askKill(session) {
     if (!session || !session.running || !validName(session.name)) return
-    if (session.remote === true) return
+    // The desktop app stops itself; from the bar it would take every
+    // terminal and agent in it along.
+    if (session.remote === true || session.app === true) return
     killTarget = session
     confirmOpen = true
     if (activeCard) activeCard.beginConfirm()
@@ -360,11 +362,6 @@ Panel {
 
   function killMessage() {
     if (!killTarget) return ""
-    // The desktop app's server is herdr-core, which holds every terminal and
-    // agent the app shows.
-    if (killTarget.app === true)
-      return "Stop herdr-core? Every terminal and agent in the Herdr app ends,"
-        + " and nothing running inside it is asked to stop first."
     return "Kill the server for " + sessionLabel(killTarget)
       + "? Nothing running inside it is asked to stop first."
   }
@@ -487,6 +484,7 @@ Panel {
   // the cursor must step over it rather than park on a dead control.
   function lastColumnFor(session) {
     if (!session) return root.columnRow
+    if (session.app === true) return root.columnOpen
     if (session.running) return root.columnDestroy
     return session.isDefault ? root.columnOpen : root.columnDestroy
   }

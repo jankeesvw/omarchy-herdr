@@ -161,9 +161,7 @@ one extra row called **Desktop app**, counted and coloured like any other.
   clears **done**. Without the app window the raw `hc` state is used.
 - **Click** the row to focus the app's window, or start it. Click an agent line
   to focus that agent inside the app first.
-- **The skull** stops herdr-core: `hc server stop`, then TERM and KILL if it
-  does not answer. The dialog warns that every terminal and agent in the app
-  ends with it. The bin never shows on this row.
+- The row has no skull and no bin: the app is stopped from the app.
 - Nothing is added when `hc` is missing or holds no live terminals, so a
   machine without the app sees no change.
 
@@ -193,7 +191,7 @@ omarchy plugin enable jankeesvw.herdr
 omarchy bar move jankeesvw.herdr --section right
 ```
 
-Needs `herdr`, `jq` and `hyprctl` on `$PATH` (and `hc` for the desktop app row). The last one is what pairs a
+Needs `herdr` (or `hc`, for the desktop app alone), `jq` and `hyprctl` on `$PATH`. The last one is what pairs a
 session with the window showing it; without Hyprland the list still works, but
 every session looks like it has no window and a click opens a new one. `ss`
 (from iproute2) is what the skull button uses to find the process behind a
