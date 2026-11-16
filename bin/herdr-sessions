@@ -191,10 +191,9 @@ require_tools() {
   # is.
   command -v herdr >/dev/null 2>&1 || \
     PATH="$HOME/.local/bin:$HOME/bin:$HOME/.local/share/mise/installs/herdr/latest:$HOME/.cargo/bin:/usr/local/bin:$PATH"
-  local tool
-  for tool in herdr jq; do
-    command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
-  done
+  command -v jq >/dev/null 2>&1 || die "jq is not installed"
+  # The desktop app alone is enough: its row comes from hc, not from herdr.
+  command -v herdr >/dev/null 2>&1 || command -v hc >/dev/null 2>&1 || die "herdr is not installed"
 }
 
 # ---------------------------------------------------------------- windows
@@ -438,6 +437,8 @@ readonly ROWS_JQ='
 # the panel is on, not the one the session runs on, so the join happens in
 # cmd_list on the local side.
 collect_sessions() {
+  # With only the desktop app installed there are no classic sessions to list.
+  command -v herdr >/dev/null 2>&1 || { printf '{"ok":true,"error":"","sessions":[]}'; return 0; }
   local sessions_json
   sessions_json=$(herdr session list --json 2>/dev/null | head -c "$((SESSIONS_BYTE_CAP + 1))") || true
   [[ -n $sessions_json ]] || die "could not reach herdr"
@@ -603,6 +604,94 @@ machine_error() {
   printf '%s' "${err:-unreachable}"
 }
 
+# ------------------------------------------------- herdr desktop app (core)
+
+# The Herdr desktop app keeps its terminals in herdr-core, not in a classic
+# herdr server, so `herdr session list` never sees them. It is shown as one
+# extra pseudo-session, named APP_SESSION, built from `hc ls`: a terminal with
+# a status is an agent, and `where` ("space / tab") gives its workspace and tab.
+# Pane ids are "app:<terminal>" so they pass valid_pane_id and cmd_focus can
+# tell them from a classic pane. Nothing is printed when hc is missing, not
+# running, or holds no live terminals, so installs without the app are unchanged.
+readonly APP_SESSION=herdr-app
+readonly APP_CLASS=herdr-app
+
+# herdr-app is also a legal classic session name. The app row is dropped from
+# the list when one exists, so the name must mean the classic session in
+# open / kill / delete too. Focus is unambiguous: app panes start with "app:".
+is_app_session() {
+  [[ ${1-} == "$APP_SESSION" ]] || return 1
+  # Without herdr there is no classic session to mistake it for.
+  command -v herdr >/dev/null 2>&1 || return 0
+  # Only "yes, it is the app" when the classic list was read and does not hold
+  # the name; an unreadable list must never take a classic session's place.
+  local list
+  list=$(herdr session list --json 2>/dev/null | head -c "$((SESSIONS_BYTE_CAP + 1))") || return 1
+  over_byte_cap "$list" "$SESSIONS_BYTE_CAP" && return 1
+  printf '%s' "$list" | jq -e --arg n "$1" '.sessions | type == "array" and (any(.[]; .name == $n) | not)' >/dev/null 2>&1
+}
+
+valid_terminal_id() {
+  [[ "${1-}" =~ ^t[0-9a-z]{1,9}$ ]]
+}
+
+app_window() {
+  # "<address>\t<workspace>" of the app's window, or nothing.
+  hyprctl clients -j 2>/dev/null | head -c "$((WINDOWS_BYTE_CAP + 1))" \
+    | jq -r --arg c "$APP_CLASS" \
+        '[.[] | select(.class == $c)][0] // empty | "\(.address // "")\t\(.workspace.name // "")"' 2>/dev/null || true
+}
+
+app_row() {
+  command -v hc >/dev/null 2>&1 || return 0
+  local raw
+  raw=$(timeout --signal=TERM 5 hc ls --json 2>/dev/null | head -c "$((SNAPSHOT_BYTE_CAP + 1))") || true
+  [[ -n $raw ]] || return 0
+  over_byte_cap "$raw" "$SNAPSHOT_BYTE_CAP" && return 0
+  local win
+  win=$(app_window | cut -f1)
+  [[ $win =~ ^0x[0-9a-fA-F]+$ ]] || win=""
+  # hc reports the core's raw status, where "done" never clears. Whether an
+  # agent has been looked at is the app's own, per-screen knowledge, so its
+  # view of the status wins when the app is running; without it the raw
+  # status stands.
+  local view
+  view=$(timeout --signal=TERM 5 herdr-app ls 2>/dev/null | head -c "$((SNAPSHOT_BYTE_CAP + 1))") || true
+  over_byte_cap "$view" "$SNAPSHOT_BYTE_CAP" && view=""
+  printf '%s' "$view" | jq -e . >/dev/null 2>&1 || view='{}'
+  printf '%s\n%s\n' "$raw" "$view" | jq -c --arg name "$APP_SESSION" --arg win "$win" \
+    --argjson cap "$AGENT_COUNT_CAP" '
+    . as $hc | input as $view
+    | ([$view.spaces[]?.tabs[]?.terminals[]? | select(.status != null and .terminal != null)
+        | {key: .terminal, value: .status}] | from_entries) as $seen
+    | $hc
+    | [.terminals[]? | select(.state == "live" and (.address | type) == "string" and (.address | test("^t[0-9a-z]{1,9}$")))] as $live
+    | select(($live | length) > 0)
+    | def ws: if (.where | type) == "string" then .where else "" end;
+      def sp: (ws | split(" / ")[0] // "");
+      def tb: (ws | split(" / ")[1] // "" | if test("^[0-9]+$") then "" else . end);
+      ([$live[] | sp | select(. != "")] | unique) as $projects
+    | ([ $live[] | select(.status != null and .status != "")
+         | {title: (.agent // "agent"), status: ($seen[.address] // .status), pane: ("app:" + .address),
+            workspace: sp, tab: tb,
+            seq: (.turn // 0 | if type == "number" then . else 0 end)} ]
+       | sort_by([(if   .status == "blocked" then 0
+                   elif .status == "done"    then 1
+                   elif .status == "working" then 2
+                   elif .status == "idle"    then 3
+                   else 4 end),
+                  (.pane | length), .pane])) as $agents
+    | def n($s): [$agents[] | select(.status == $s)] | length;
+      {name: $name, isDefault: false, running: true, version: "",
+       agents: ($agents | length), working: n("working"), blocked: n("blocked"),
+       idle: n("idle"), done: n("done"),
+       workspaces: ($projects | length),
+       agentList: ($agents | .[:$cap]),
+       projects: $projects,
+       app: true, windowAddress: $win}
+  ' 2>/dev/null || true
+}
+
 # Every session the panel shows: this host's, plus each enabled machine's.
 # A machine that cannot be reached or cannot answer stays in the payload as
 # a row the panel marks unreachable; it never takes the local rows down with
@@ -619,8 +708,10 @@ cmd_list() {
   local machines_json
   machines_json=$(machine_list)
 
-  local windows
+  local windows app
   windows=$(window_map || true)
+  app=$(app_row)
+  [[ -n $app ]] || app='null'
 
   # Machines are asked in parallel, each answer in a file of its own: a
   # stalled dial must not hold the other machines' rows hostage.
@@ -692,13 +783,15 @@ cmd_list() {
          error: (.[4] // "")}]') || machines_with_status='[]'
 
   # On stdin for the same reason as ROWS_JQ: the local rows alone carry every
-  # agent title, and each machine's rows ride along in $remote. The window
-  # map stays an argument, at one short line per open herdr window.
-  printf '%s\n%s\n%s\n' "$local_json" "$machines_with_status" "$remote" | jq -c \
+  # agent title, and each machine's rows (plus the app row) ride along on
+  # stdin. The window map stays an argument, at one short line per open herdr
+  # window.
+  printf '%s\n%s\n%s\n%s\n' "$local_json" "$machines_with_status" "$remote" "$app" | jq -c \
     --arg windows "$windows" '
     . as $local
     | input as $machines
     | input as $remote
+    | input as $app
     | ($windows | split("\n") | map(select(length > 0) | split("\t"))
       | map({key: (.[0] + "\u0000" + .[1]), value: .[2]}) | from_entries) as $win
     | ($machines | map({key: .id, value: .}) | from_entries) as $mach
@@ -709,8 +802,13 @@ cmd_list() {
            | . + {machineId: $mid,
                   machineLabel: ($mach[$mid].label // ""),
                   sshTarget: ($mach[$mid].target // ""),
-                  remote: true} ])
-    | map(. + {windowAddress: ($win[(.sshTarget + "\u0000" + .name)] // "")})
+                  remote: true} ]
+       # Skip the app row if a local classic session already has the same name
+       # (herdr-app is a legal classic session name) so they do not collide.
+       + (if $app == null or any($local.sessions[]; .name == $app.name)
+          then []
+          else [$app + {machineId: "", machineLabel: "", sshTarget: "", remote: false}] end))
+    | map(if .app == true then . else . + {windowAddress: ($win[(.sshTarget + "\u0000" + .name)] // "")} end)
     | sort_by([(if .machineId == "" then 0 else 1 end),
                (.machineLabel | ascii_downcase),
                (if .isDefault then 0 else 1 end),
@@ -730,12 +828,35 @@ cmd_list() {
 
 # ------------------------------------------------------------- open a session
 
+launch_detached() {
+  local -a prefix=(setsid)
+  command -v uwsm-app >/dev/null 2>&1 && prefix+=(uwsm-app --)
+  ( umask "$INHERITED_UMASK" && exec "${prefix[@]}" "$@" ) >/dev/null 2>&1 &
+  disown
+}
+
 # Bring up the window showing a session, or start one. Returns 0 once
 # something has been done, 1 when no terminal could be started. A remote
 # session is matched and opened by its ssh target as well as its name: two
 # machines can both have a session called "default".
 show_session() {
   local name="$1" target="${2-}"
+
+  # The desktop app is one window of its own: focus it, or start it.
+  if [[ -z $target ]] && is_app_session "$name"; then
+    local aaddr="" aws=""
+    IFS=$'\t' read -r aaddr aws < <(app_window) || true
+    if [[ ${aaddr-} =~ ^0x[0-9a-fA-F]+$ ]]; then
+      if [[ ${aws-} =~ ^(special:)?[A-Za-z0-9_-]{1,32}$ ]]; then
+        hyprctl dispatch "hl.dsp.focus({ workspace = '$aws' })" >/dev/null 2>&1
+      fi
+      hyprctl dispatch "hl.dsp.focus({ window = 'address:$aaddr' })" >/dev/null 2>&1
+      return 0
+    fi
+    command -v herdr-app >/dev/null 2>&1 || return 1
+    launch_detached herdr-app
+    return 0
+  fi
 
   local address workspace
   IFS=$'\t' read -r address workspace < <(
@@ -784,23 +905,14 @@ show_session() {
   # window rules and the window matching above key off, and a terminal chosen
   # from the desktop's list is not guaranteed to take one. xdg-terminal-exec
   # stays as the fallback for a machine without foot.
-  local -a launch=()
-  if command -v uwsm-app >/dev/null 2>&1; then
-    launch=(setsid uwsm-app --)
-  else
-    launch=(setsid)
-  fi
-
   if command -v foot >/dev/null 2>&1; then
-    launch+=(foot "--app-id=$APP_ID" "--working-directory=$HOME" -e "${herdr_cmd[@]}")
+    launch_detached foot "--app-id=$APP_ID" "--working-directory=$HOME" -e "${herdr_cmd[@]}"
   elif command -v xdg-terminal-exec >/dev/null 2>&1; then
-    launch+=(xdg-terminal-exec "--app-id=$APP_ID" "--dir=$HOME" -- "${herdr_cmd[@]}")
+    launch_detached xdg-terminal-exec "--app-id=$APP_ID" "--dir=$HOME" -- "${herdr_cmd[@]}"
   else
     return 1
   fi
 
-  ( umask "$INHERITED_UMASK" && exec "${launch[@]}" ) >/dev/null 2>&1 &
-  disown
   return 0
 }
 
@@ -826,6 +938,30 @@ cmd_focus() {
   local name="${1-}" pane="${2-}" machine="${3-}"
   valid_session_name "$name" || die "not a session name"
   valid_pane_id "$pane" || die "not a pane id"
+
+  # An app agent: focus its terminal inside the app (starting and waiting for
+  # the window first if none is open), then focus the window.
+  if [[ $name == "$APP_SESSION" && -z $machine && $pane == app:* ]]; then
+    local term="${pane#app:}"
+    valid_terminal_id "$term" || die "not a terminal id"
+    local aaddr=""
+    aaddr=$(app_window | cut -f1)
+    if [[ ! $aaddr =~ ^0x[0-9a-fA-F]+$ ]]; then
+      show_session "$name" "" || die "no terminal available"
+      local i
+      for ((i = 0; i < 50; i++)); do
+        sleep 0.1
+        aaddr=$(app_window | cut -f1)
+        [[ $aaddr =~ ^0x[0-9a-fA-F]+$ ]] && break
+      done
+      # Never launch a second app: if the window is still not up, it is on its way.
+      [[ $aaddr =~ ^0x[0-9a-fA-F]+$ ]] || { printf '{"ok":true}\n'; return 0; }
+    fi
+    timeout --signal=TERM 5 herdr-app do agent.focus --terminal "$term" >/dev/null 2>&1 || true
+    show_session "$name" "" || die "no terminal available"
+    printf '{"ok":true}\n'
+    return 0
+  fi
 
   # No `--` before the pane id: herdr does not take one, and valid_pane_id has
   # already refused anything but two runs of letters, digits, dash and
@@ -892,6 +1028,7 @@ cmd_kill() {
   valid_session_name "$name" || die "not a session name"
   # Killing by pid is a local act; a remote server is out of reach on purpose.
   [[ -z ${2-} ]] || die "remote servers are not killed from here"
+  is_app_session "$name" && die "the desktop app is not stopped from here"
 
   local pid
   pid=$(server_pid_for "$(socket_of "$name")") || die "no running server for that session"
@@ -911,6 +1048,7 @@ cmd_delete() {
   local name="${1-}"
   valid_session_name "$name" || die "not a session name"
   [[ $name == default ]] && die "the default session is not deleted from here"
+  is_app_session "$name" && die "the desktop app is not deleted from here"
   [[ -z ${2-} ]] || die "remote sessions are not deleted from here"
   # No `--` before the name: herdr's argument parser does not take one, and a
   # session name has already been checked against the shape above.

@@ -340,7 +340,9 @@ Panel {
   // reflexive Enter is worse than no dialog, because it trains the reflex.
   function askKill(session) {
     if (!session || !session.running || !validName(session.name)) return
-    if (session.remote === true) return
+    // The desktop app stops itself; from the bar it would take every
+    // terminal and agent in it along.
+    if (session.remote === true || session.app === true) return
     killTarget = session
     confirmOpen = true
     if (activeCard) activeCard.beginConfirm()
@@ -482,6 +484,7 @@ Panel {
   // the cursor must step over it rather than park on a dead control.
   function lastColumnFor(session) {
     if (!session) return root.columnRow
+    if (session.app === true) return root.columnOpen
     if (session.running) return root.columnDestroy
     return session.isDefault ? root.columnOpen : root.columnDestroy
   }
@@ -583,9 +586,13 @@ Panel {
   // "default" is herdr's own name for the shared session, and it reads as a
   // setting rather than a place. On another machine herdr names that session
   // after the machine, so the panel does too. A numbered one is a Hyprland
-  // workspace, which is worth saying out loud.
+  // workspace, which is worth saying out loud. The Herdr desktop app is one
+  // row of its own, called what it is.
   function sessionLabel(session) {
     if (!session) return ""
+    // The desktop app is not a named session at all; "herdr-app" is only the
+    // handle the script gives it.
+    if (session.app === true) return "Desktop app"
     if (session.isDefault && session.remote === true)
       return session.machineLabel || session.sshTarget || session.name
     if (session.isDefault) return "Shared session"

@@ -648,6 +648,7 @@ PanelKeyCatcher {
                 hasCursor: panel.cursorOnSession(row.index)
                   && panel.column === panel.columnDestroy
                 visible: row.modelData.running && !row.modelData.remote
+                  && row.modelData.app !== true
                 iconText: panel.iconKill
                 tooltipText: "Kill this server"
                 foreground: Qt.darker(panel.foreground, 1.4)
